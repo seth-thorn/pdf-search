@@ -1,0 +1,44 @@
+PDF Search
+==========
+A small Mac app for searching the full text of all your PDFs at once.
+Drag in folders of PDFs, type a few words, and see every PDF (and page) that contains them.
+
+Requires macOS 13 (Ventura) or later. Runs on Apple Silicon and Intel Macs.
+
+
+INSTALL
+-------
+1. Drag "PDF Search" onto the Applications folder in this window.
+
+2. Open it from Applications. The first time, macOS will warn that it can't verify the
+   app (it isn't from the App Store or a registered Apple developer). To allow it:
+
+   macOS 15 (Sequoia) or later:
+     - Click "Done" on the warning (NOT "Move to Trash").
+     - Open System Settings > Privacy & Security, scroll down to the message
+       "PDF Search was blocked...", click "Open Anyway", and enter your password.
+     - Open PDF Search again and click "Open".
+
+   macOS 13-14:
+     - Right-click (or Control-click) PDF Search in Applications, choose Open, then Open again.
+
+   You only have to do this once.
+
+   (Terminal alternative:  xattr -dr com.apple.quarantine "/Applications/PDF Search.app")
+
+
+GET STARTED
+-----------
+- Drag a folder of PDFs into the window. It reads every PDF once (a progress bar shows how
+  far it's got); after that, searches are instant.
+- Type words in the search box. Click a result to see the PDF with the matches marked.
+- The full guide is in Extras > "PDF Search Guide.pdf".
+
+Your PDFs stay where they are. PDF Search never moves or copies them. It only changes a PDF
+if you highlight text in it (highlights are saved into the file, like in Preview).
+
+
+WHAT'S IN EXTRAS
+----------------
+- PDF Search Guide.pdf: how everything works
+- Source Code: the complete app (one Swift file), so you can build or change it yourself
