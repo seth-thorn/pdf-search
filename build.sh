@@ -13,4 +13,6 @@ swiftc -O -parse-as-library -swift-version 5 -target "$(uname -m)-apple-macos13.
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force -s - "$APP" >/dev/null 2>&1 || true
+echo "--- self-test (bibliography code)"
+"$APP/Contents/MacOS/PDFSearch" --selftest 2>&1 || echo "(self-test did not run)"
 echo "Built: $APP"

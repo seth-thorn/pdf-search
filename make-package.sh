@@ -34,6 +34,7 @@ mkdir -p "$EXTRAS/Source Code"
 cp "dist/PDF Search Guide.pdf" "$EXTRAS/"
 cp PDFSearch.swift Info.plist AppIcon.icns build.sh "Build PDF Search.command" "$EXTRAS/Source Code/"
 cp -R test-pdfs "$EXTRAS/Source Code/"
+cp -R tools "$EXTRAS/Source Code/"
 cp "dist/Developer Notes.md" "$EXTRAS/Source Code/"
 chmod +x "$EXTRAS/Source Code/build.sh" "$EXTRAS/Source Code/Build PDF Search.command"
 

@@ -1,7 +1,7 @@
 PDF Search
 ==========
-A small Mac app for searching the full text of all your PDFs at once.
-Drag in folders of PDFs, type a few words, and see every PDF (and page) that contains them.
+A small Mac app for searching, reading, annotating and citing your research PDFs.
+Search every word of every PDF, write notes in the margins, copy citations.
 
 Requires macOS 13 (Ventura) or later. Runs on Apple Silicon and Intel Macs.
 
@@ -29,16 +29,21 @@ INSTALL
 
 GET STARTED
 -----------
-- Drag a folder of PDFs into the window. It reads every PDF once (a progress bar shows how
-  far it's got); after that, searches are instant.
+- Put your PDFs in a folder called "Papers" in your home folder (your own papers in Papers/Library).
+  PDF Search reads every PDF once (a progress bar shows how far it's got); after that, searches
+  are instant. You can also drag any folder of PDFs into the window.
 - Type words in the search box. Click a result to see the PDF with the matches marked.
+- Select a passage and press H to highlight it. Type a note in the box that appears beside it.
+- Your bibliography is a plain library.bib file in the Papers folder (or your Obsidian vault,
+  if you have one). Shift-Command-C copies a citation for the open paper.
 - The full guide is in Extras > "PDF Search Guide.pdf".
 
 Your PDFs stay where they are. PDF Search never moves or copies them. It only changes a PDF
-if you highlight text in it (highlights are saved into the file, like in Preview).
+when you highlight text or write a margin note in it (saved into the file, like in Preview).
 
 
 WHAT'S IN EXTRAS
 ----------------
 - PDF Search Guide.pdf: how everything works
-- Source Code: the complete app (one Swift file), so you can build or change it yourself
+- Source Code: the complete app (one Swift file), so you can build or change it yourself,
+  plus a tool for moving a Zotero library into PDF Search

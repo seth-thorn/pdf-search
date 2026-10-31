@@ -1,18 +1,19 @@
 # PDF Search
 
-A small, native Mac app for searching the full text of all your PDFs at once. It's a lightweight alternative to DEVONthink for one job: find every PDF (and page) that mentions something, then jump straight to it.
+A small, native Mac app for reading and citing research PDFs: full-text search across all of them, notes in the margins, and a plain BibTeX bibliography. A lightweight alternative to DEVONthink and Zotero for people who want one simple tool.
 
 <img src="dist/icon.png" width="96" align="right" alt="">
 
-- **Drag in folders of PDFs** (a Zotero library, course readings, a collection of papers…). They're indexed once, and then searches are instant.
-- **Type words** and see matching PDFs as you type, with snippets and page counts. Prefix matching, `"exact phrases"`, and accents/case ignored.
-- **Search in one folder or all of them.**
-- **Click a result** and the PDF opens at the first match with every match marked. Step through them with ⌘G.
-- **⌘F** finds inside the open PDF.
-- **Highlight** text like in Preview. Highlights are saved into the PDF.
-- Your PDFs stay where they are. The app only stores an index of their text.
+- **Search everything.** Every word of every PDF in your `~/Papers` folder, as you type, with snippets and page counts. Prefix matching, `"exact phrases"`, and accents/case ignored. Search one folder or all of them.
+- **Read.** Click a result and the PDF opens at the first match, with every match marked. ⌘G steps through them, and ⌘F finds within the open PDF.
+- **Write in the margins.** Select a passage and press **H**. It's highlighted, and a note box opens in the notes column beside the PDF. Every highlight has a note box, which saves as you type. Each highlight has a clear Remove button. Notes are saved *inside the PDF* as standard comments, so Preview, Acrobat and other apps see them too, and they're searchable.
+- **Cite.** PDFs are matched to entries in a plain `library.bib`, so results show real titles and authors. ⇧⌘C copies `[@cascone2000aesthetics]` (Markdown/Pandoc), and ⌥⇧⌘C copies `\cite{cascone2000aesthetics}` (LaTeX/Overleaf). Books you don't have as PDFs live in the same bibliography.
+- **Collections.** A reading list for each thing you're writing, kept as a plain Markdown note (`- [[@key]] Author (Year) Title`). Add papers with one click, browse a collection like a folder, and turn it into a `.bib` file for Overleaf or Pandoc.
+- **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote, a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
 
-It's one Swift file (SwiftUI + PDFKit + SQLite full-text search) with no dependencies. Requires macOS 13 or later, on Apple Silicon or Intel.
+**Obsidian is optional.** If you have a folder called `Obsidian Vault` in your home folder, `library.bib`, the paper notes (`Literature/`) and collections (`Collections/`) go there. Otherwise they go in `~/Papers` (`library.bib`, `Notes/`, `Collections/`). You can open them with any text editor or notes app, and change all of this in **Settings (⌘,)**.
+
+It's one Swift file (SwiftUI + PDFKit + SQLite full-text search) with no dependencies. Requires macOS 13 or later.
 
 ## Build it
 
@@ -26,15 +27,45 @@ It's one Swift file (SwiftUI + PDFKit + SQLite full-text search) with no depende
    cd pdf-search          # or: cd ~/Downloads/pdf-search-main
    bash build.sh
    ```
-   The app is built into `/Applications/PDF Search.app` (or `~/Applications` if you can't write to `/Applications`). Open it from there.
+   The app is built into `/Applications/PDF Search.app` (or `~/Applications` if you can't write to `/Applications`). The build also prints a short self-test.
 
 Because you build it yourself, macOS doesn't show the "unverified developer" warning.
-(`Build PDF Search.command` does the same thing with a log file and can be double-clicked, but macOS may block double-clicking scripts that came from a download, so `bash build.sh` is the reliable way.)
 
-## Use it
+## Set up your papers
 
-See **[PDF Search Guide.pdf](dist/PDF%20Search%20Guide.pdf)** for everything: adding folders, search syntax, ⌘F, highlighting and keyboard shortcuts.
-To try it quickly, drag the `test-pdfs` folder in and search for `glitch`.
+```
+~/Papers/
+├── Library/        ← your own papers, ideally named by citation key (cascone2000aesthetics.pdf)
+└── …               ← any other collections (conference proceedings, course readings…)
+```
+
+PDF Search indexes `~/Papers` automatically. Each folder inside it can be searched on its own with the "Search in" menu. You can also drag any other folder into the window.
+
+**Citation keys** are last name + year + the first meaningful word of the title, all lowercase: `cascone2000aesthetics`, `collins2006handmade`. If two items would get the same key, the second gets a letter (`…b`).
+
+**Coming from Zotero?** [`tools/import_zotero.py`](tools/) copies your Zotero library into `~/Papers/Library` and writes `library.bib` with fresh keys. It also writes the highlights you made in Zotero's reader into the PDFs. Zotero itself is only read, never changed. See [tools/README.md](tools/README.md).
+
+## Everyday use
+
+| Keys | Action |
+|---|---|
+| type in the search box | search everything (or the folder chosen in "Search in") |
+| ⌘F | find inside the open PDF |
+| ⌘G / ⇧⌘G | next / previous match |
+| H | highlight the selected text (a note box opens beside it), also ⌃⌘H |
+| ⇧⌘C / ⌥⇧⌘C | copy `[@key]` / `\cite{key}` for the open paper |
+| ⌘O / ⌘R | add PDFs or folders / rescan folders |
+| ⌘0 | zoom to fit |
+| ⌘, | settings: papers folder, `library.bib` location, notes and collections folders |
+
+More detail is in **[PDF Search Guide.pdf](dist/PDF%20Search%20Guide.pdf)**. To try it quickly, drag the `test-pdfs` folder in and search for `glitch`.
+
+## Writing with it
+
+- **Markdown (Obsidian, iA Writer, any editor) + Pandoc:** cite with `[@key]`, then export with `pandoc paper.md --citeproc --bibliography ~/Papers/library.bib -o paper.pdf` (or `.docx`). Add `--csl apa.csl` for a specific style.
+- **LaTeX / Overleaf:** upload `library.bib` and cite with `\cite{key}`.
+- A collection's ••• menu has **Make Bibliography (.bib)**: just that project's entries, ready for Overleaf.
+- The `@key.md` paper notes already contain your quotes with page-cited references, ready to paste into a draft.
 
 ## Repository layout
 
@@ -44,6 +75,7 @@ To try it quickly, drag the `test-pdfs` folder in and search for `glitch`.
 | `Info.plist`, `AppIcon.icns` | app bundle metadata and icon |
 | `build.sh`, `Build PDF Search.command` | build and install the app |
 | `make-package.sh` | makes a shareable `.dmg` (universal app + guide + source) on your Desktop |
+| `tools/` | one-time Zotero import |
 | `dist/` | the guide PDF, developer notes and read-me used by the `.dmg` |
 | `test-pdfs/` | three tiny PDFs for testing |
 

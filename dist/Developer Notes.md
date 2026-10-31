@@ -5,12 +5,13 @@ It has no dependencies, no Xcode project and no package manager.
 
 ## Files
 
-- `PDFSearch.swift`: the entire app (~1,230 lines).
-- `Info.plist`: bundle metadata (bundle id `local.pdfsearch`, min macOS 13; accepts PDFs/folders dropped on the Dock icon).
+- `PDFSearch.swift`: the entire app (~2,500 lines).
+- `Info.plist`: bundle metadata (bundle id `local.pdfsearch`, version 2.0, min macOS 13; accepts PDFs/folders dropped on the Dock icon; registers the `pdfsearch://` URL scheme).
 - `AppIcon.icns`: the icon.
-- `build.sh`: compiles into `/Applications/PDF Search.app` (or `~/Applications` if `/Applications` isn't writable). Quits a running copy first.
+- `build.sh`: compiles into `/Applications/PDF Search.app` (or `~/Applications` if `/Applications` isn't writable). Quits a running copy first, then runs `PDFSearch --selftest` (exercises the BibTeX parser, key rule, writer and link encoding, and parses your real `library.bib`).
 - `Build PDF Search.command`: double-clickable wrapper. Checks for the developer tools, logs to `build.log`, opens the app.
 - `test-pdfs/`: three tiny PDFs for checking search and highlighting.
+- `tools/`: one-time Zotero import (`import_zotero.py`) and the shared key/BibTeX helpers (`bibtools.py`).
 
 ## Building
 
@@ -35,9 +36,15 @@ A universal (Apple Silicon + Intel) build compiles once per `-target` (`arm64-�
 | What | Where |
 |---|---|
 | Search index | `~/Library/Application Support/PDF Search/index.sqlite` (+ `-wal`, `-shm`) |
-| Settings | user defaults `local.pdfsearch`: `scope` (last "Search in" folder), `highlightColor` |
+| Papers | `~/Papers` (added automatically); `~/Papers/Library` for your own papers |
+| Bibliography | `library.bib`: `~/Obsidian Vault/library.bib` if that vault exists, else `~/Papers/library.bib` |
+| Reference collections | any other `.bib` in an added folder or one level down (e.g. a conference archive's own `.bib`) |
+| Paper notes | `@key.md` in `~/Obsidian Vault/Literature` if that vault exists, else `~/Papers/Notes` |
+| Collections | `<name>.md` (+ `<name>.bib`) in `~/Obsidian Vault/Collections`, else `~/Papers/Collections` |
+| Settings | user defaults `local.pdfsearch`: `papersFolder`, `libraryBib`, `notesFolder`, `collectionsFolder`, `writeNotes`, `scope`, `highlightColor`, `showMargin` |
 
-Indexing never modifies PDFs. Highlighting writes highlight annotations into the PDF being viewed.
+All paths are in `enum Paths` and editable in Settings (⌘,). Indexing never modifies PDFs.
+Highlights and margin notes are written into the PDF being viewed.
 
 ## How it works (architecture)
 
@@ -94,7 +101,35 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    - `parse(q)`: each word → `"word"*`, each quoted phrase → `"phrase"`, joined with spaces
      (= AND). It also returns the plain terms used for marking hits in the PDF.
    - `renameFolder`, `removeFolder`, `remove` (exclude files), `confirmClear`, `choose` (open panel).
-5. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+5. **Bibliography**: `BibEntry`, `BibIndex` (lookup by PDF path or by file name = key), `BibParser`
+   (byte-level BibTeX parser with light LaTeX decoding), `CiteKey` (the key rule; mirrored in
+   `tools/bibtools.py`), `BibWriter` (formatting, escaping `& % # _`, appending to `library.bib`).
+   `Library.reloadBib()` re-reads `library.bib` plus reference `.bib` files whenever one changes
+   (checked on launch, after indexing and whenever the app comes to the front), then
+   `applyBibToIndex` rewrites each file's page-0 row with title/authors/year/key so they're searchable.
+   Results get their `entry`; library entries without an indexed PDF are added as `Hit`s with
+   negative ids and shown as an `EntryCard`. `cite()` copies `[@key]` / `\cite{key}`;
+   `ensureInLibrary()` copies a reference entry into `library.bib` with a new key first.
+6. **Marginalia**: `MarginNote`, `Marginalia` (collect markup annotations in reading order, recover the
+   quoted text from quad points, build and update `@key.md`), `MarginColumn` / `MarginRow` (the
+   notes column, `NoteCard`s with an always-editable note box and a Remove button). H (handled in
+   `HighlightingPDFView.keyDown`), the "Highlight selected text" button or ⌃⌘H →
+   `Viewer.highlightAndComment()` → `focusNoteID` puts the cursor in the new card's note box;
+   `updateComment` writes `annotation.contents` as you type and saves 1.5 s after you stop.
+   Clicking a highlight in the PDF (a local `leftMouseUp` monitor) focuses its card. After each save, `Library.afterSave()`
+   re-indexes the file (notes are appended to their page's text, so they're searchable) and
+   rewrites only the block between `<!-- marginalia:start -->` and `<!-- marginalia:end -->` in the
+   note; everything outside it is the user's. Links in notes are `pdfsearch://open?file=…&page=N`,
+   handled by `Library.handle(_:)` (from `.onOpenURL` and the app delegate) → `linkRequest`.
+7. **Collections**: `Collection` (name, path, ordered keys parsed from every `@key` in the note) and
+   `Library.reloadCollections()` (on launch and whenever the app comes to the front). `addToCollection`
+   appends `- [[@key]] Author (Year) Title` (after `ensureInLibrary`), `newCollection`,
+   `removeFromCollection` (drops lines mentioning the key), `makeBibliography` (writes `<name>.bib`).
+   A collection is a "Search in" scope: `runSearchNow` searches everything and keeps hits whose entry
+   key is in the collection; an empty query lists it in the note's order. `CollectionMenu` is the
+   "Add to Collection" menu used in the toolbar, results context menu and `EntryCard`.
+8. **Settings**: `SettingsView` (⌘,) edits the `Paths` defaults.
+9. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 
@@ -131,24 +166,22 @@ PDFKit) need to agree, and stemming would match words that can't be marked.
 - Password-protected PDFs are skipped ("can't read") and can't be highlighted.
 - Very common words can produce thousands of marks; capped at ~5000 per document.
 - Folder scopes are by path. If a folder is moved or renamed, remove it and add it again.
-- Highlighting has no undo (use Remove Highlight). Only highlights, no notes/underline yet.
+- Highlighting has no undo (use Remove Highlight).
+- Adding a new paper or book with a DOI/ISBN lookup isn't built yet: for now, add entries to
+  `library.bib` by hand (or with any BibTeX tool) and name the PDF `<key>.pdf` in `Library/`.
+- Margin notes are listed in page order, not pinned next to their passage on screen.
 
 ## Ideas for extending (and where to put them)
 
+- **Add a paper / book**: drop a PDF → find a DOI (regex `10\.\d{4,9}/\S+` on page 1) or arXiv id →
+  `https://doi.org/<doi>` with `Accept: application/x-bibtex` → confirm card → `CiteKey.make` →
+  rename to `Library/<key>.pdf` → `BibWriter.append`. Books: ISBN → Open Library / Google Books.
 - **Undo/redo for highlights**: register add/remove with the window's `NSUndoManager` in
   `Viewer.addHighlight` / `removeHighlight`.
-- **More annotation types**: underline/strikethrough (`.underline`, `.strikeOut` with the same
-  quad points), notes (`.text`).
-- **Highlights sidebar / export**: list a PDF's highlight annotations with their text
-  (`page.selection(for: annotation.bounds)`), and export to Markdown/Obsidian.
 - **OCR for scans**: in `Library.extract`, if a page's text is empty, render the page
   (`PDFPage.thumbnail(of:for:)`) and run Vision's `VNRecognizeTextRequest`.
 - **Live updates**: watch added folders with FSEvents and call `index(...)` for changed paths.
 - **OR / NOT / NEAR**: extend `Library.parse` to pass these through, and keep `terms` only for
   positive terms.
 - **Sort / filter results**: by name, date, number of hits; by year.
-- **Metadata**: PDF title/author from `PDFDocument.documentAttributes`. For Zotero, read
-  `~/Zotero/zotero.sqlite` (copy it first; Zotero locks it) to show real titles/authors/years and
-  open items in Zotero (`zotero://select/library/items/<key>`; the 8-character folder name under
-  `storage/` is the attachment key).
-- **Quick Look** (spacebar) on a result, **copy citation**, **export results** as a list.
+- **Quick Look** (spacebar) on a result, **export results** as a list or a reading list in Markdown.

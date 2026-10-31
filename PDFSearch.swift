@@ -14,6 +14,11 @@ struct PDFSearchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var lib = Library.shared
 
+    init() {
+        // `PDFSearch --selftest` checks the bibliography code and exits (run by build.sh)
+        if CommandLine.arguments.contains("--selftest") { SelfTest.run(); exit(0) }
+    }
+
     var body: some Scene {
         Window("PDF Search", id: "main") {
             ContentView()
@@ -27,22 +32,91 @@ struct PDFSearchApp: App {
                 Divider()
                 Button("Rescan Folders") { lib.refresh() }
                     .keyboardShortcut("r")
+                Button("Write Notes for All Annotated PDFs") { lib.exportAllMarginalia() }
                 Button("Clear Index…") { lib.confirmClear() }
             }
             CommandGroup(replacing: .textEditing) {
                 Button("Find in This PDF…") { lib.findRequest += 1 }
                     .keyboardShortcut("f")
-                Button("Highlight Selection / Highlighter") { lib.highlightRequest += 1 }
+                Button("Highlight Selection (or press H)") { lib.noteRequest += 1 }
                     .keyboardShortcut("h", modifiers: [.command, .control])
+                Divider()
+                Button("Copy Citation [@key]") { lib.citeRequest += 1 }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                Button("Copy LaTeX Citation \\cite{key}") { lib.citeTexRequest += 1 }
+                    .keyboardShortcut("c", modifiers: [.command, .shift, .option])
             }
         }
+        Settings {
+            SettingsView().environmentObject(lib)
+        }
+    }
+}
+
+/// PDF Search ▸ Settings (⌘,): where papers, library.bib and notes live.
+struct SettingsView: View {
+    @EnvironmentObject var lib: Library
+    @State private var papers = Paths.papers
+    @State private var bib = Paths.libraryBib
+    @State private var notes = Paths.notesFolder
+    @State private var collections = Paths.collectionsFolder
+    @AppStorage("writeNotes") private var writeNotes = true
+
+    var body: some View {
+        Form {
+            row("Papers folder", papers, help: "Searched automatically. New papers go in its Library folder.") { path in
+                set("papersFolder", path); papers = Paths.papers; lib.refresh()
+            } reset: { set("papersFolder", nil); papers = Paths.papers; lib.refresh() }
+            row("library.bib in", (bib as NSString).deletingLastPathComponent,
+                help: "Your bibliography. Point Overleaf, Pandoc or Obsidian at this file.") { path in
+                set("libraryBib", path + "/library.bib"); bib = Paths.libraryBib; lib.reloadBib(force: true)
+            } reset: { set("libraryBib", nil); bib = Paths.libraryBib; lib.reloadBib(force: true) }
+            Toggle("Write a Markdown note for each paper I annotate", isOn: $writeNotes)
+            row("Notes folder", notes, help: "Plain Markdown files (@key.md): any notes app can open them. Obsidian users: a folder inside your vault.") { path in
+                set("notesFolder", path); notes = Paths.notesFolder
+            } reset: { set("notesFolder", nil); notes = Paths.notesFolder }
+                .disabled(!writeNotes)
+            row("Collections folder", collections, help: "One Markdown note per collection, listing its papers as [[@key]] lines.") { path in
+                set("collectionsFolder", path); collections = Paths.collectionsFolder; lib.reloadCollections()
+            } reset: { set("collectionsFolder", nil); collections = Paths.collectionsFolder; lib.reloadCollections() }
+        }
+        .padding(20)
+        .frame(width: 560)
+    }
+
+    private func set(_ key: String, _ value: String?) {
+        if let v = value { UserDefaults.standard.set(v, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    private func row(_ label: String, _ path: String, help: String,
+                     choose: @escaping (String) -> Void, reset: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label).frame(width: 110, alignment: .leading)
+                Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    .lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Choose…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.canCreateDirectories = true
+                    panel.prompt = "Choose"
+                    if panel.runModal() == .OK, let url = panel.url { choose(url.standardizedFileURL.path) }
+                }
+                Button("Default") { reset() }
+            }
+            Text(help).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     // PDFs or folders dropped on the Dock icon
-    func application(_ application: NSApplication, open urls: [URL]) { Library.shared.add(urls) }
+    func application(_ application: NSApplication, open urls: [URL]) { Library.shared.handle(urls) }
 }
 
 // MARK: - Main window
@@ -53,6 +127,9 @@ struct ContentView: View {
     @State private var selection: Int?
     @State private var dropTargeted = false
     @State private var showFind = false
+    @AppStorage("showMargin") private var showMargin = true
+    /// a library entry with no PDF (e.g. a book), shown as a card instead of a PDF
+    @State private var entryOnly: BibEntry?
     @State private var findText = ""
     @FocusState private var findFocused: Bool
 
@@ -89,7 +166,19 @@ struct ContentView: View {
             if !findMode, let p = viewer.path { viewer.show(path: p, terms: lib.terms, page: 0) }
         }
         .onChange(of: lib.findRequest) { _ in openFind() }
-        .onChange(of: lib.highlightRequest) { _ in viewer.highlightKey() }
+        .onChange(of: lib.citeRequest) { _ in cite(.pandoc) }
+        .onChange(of: lib.noteRequest) { _ in
+            showMargin = true
+            viewer.highlightAndComment()
+        }
+        .onChange(of: viewer.focusNoteID) { id in if id != nil { showMargin = true } }
+        .onChange(of: lib.linkRequest) { req in
+            guard let req = req else { return }
+            entryOnly = nil
+            viewer.show(path: req.path, terms: [], page: req.page)
+        }
+        .onOpenURL { url in lib.handle([url]) }
+        .onChange(of: lib.citeTexRequest) { _ in cite(.latex) }
         .task(id: findText) {
             guard showFind else { return }
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -100,26 +189,50 @@ struct ContentView: View {
 
     // Sidebar: results list + status line
     var searchPrompt: String {
+        if let c = scopeCollection { return "Search \(c.name)" }
         if let s = lib.scope, let f = lib.folders.first(where: { $0.path == s }) { return "Search \(f.name)" }
-        return "Search all PDFs"
+        return "Search everything"
+    }
+    var scopeFolder: Folder? { lib.scope.flatMap { s in lib.folders.first { $0.path == s } } }
+    var scopeCollection: Collection? { lib.scope.flatMap { s in lib.collections.first { $0.path == s } } }
+
+    /// the entry behind the first selected result
+    func entryFor(_ ids: Set<Int>) -> BibEntry? {
+        guard let id = ids.first, let h = lib.results.first(where: { $0.id == id }) else { return nil }
+        return h.entry ?? (h.path.isEmpty ? nil : lib.bib.entry(forPath: h.path))
     }
 
     var scopeBar: some View {
         HStack(spacing: 6) {
             Picker("Search in", selection: $lib.scope) {
-                Text("All PDFs (\(lib.docCount))").tag(String?.none)
+                Text("Everything (\(lib.docCount))").tag(String?.none)
                 Divider()
                 ForEach(lib.folders) { f in
-                    Text("\(f.name) (\(f.count))").tag(Optional(f.path))
+                    Text(verbatim: String(repeating: "\u{2003}", count: f.depth) + "\(f.name)  (\(f.count))")
+                        .tag(Optional(f.path))
+                }
+                if !lib.collections.isEmpty {
+                    Divider()
+                    ForEach(lib.collections) { c in
+                        Label("\(c.name)  (\(c.keys.count))", systemImage: "books.vertical")
+                            .tag(Optional(c.path))
+                    }
                 }
             }
             .pickerStyle(.menu)
             Menu {
-                if let s = lib.scope {
-                    Button("Rename…") { lib.renameFolder(s) }
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: s)]) }
-                    Divider()
-                    Button("Remove Folder from Index…") { lib.removeFolder(s) }
+                if let c = scopeCollection {
+                    Button("Make Bibliography (.bib)") { lib.makeBibliography(c) }
+                    Button("Open Collection Note") { NSWorkspace.shared.open(URL(fileURLWithPath: c.path)) }
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: c.path)]) }
+                }
+                if let f = scopeFolder {
+                    if f.isRoot { Button("Rename…") { lib.renameFolder(f.path) } }
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: f.path)]) }
+                    if f.isRoot {
+                        Divider()
+                        Button("Remove Folder from Index…") { lib.removeFolder(f.path) }
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -128,7 +241,7 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(lib.scope == nil)
-            .help("Rename, show or remove this folder")
+            .help("Folder or collection options")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -136,7 +249,7 @@ struct ContentView: View {
 
     var sidebar: some View {
         VStack(spacing: 0) {
-            if !lib.folders.isEmpty {
+            if !lib.folders.isEmpty || !lib.collections.isEmpty {
                 scopeBar
                 Divider()
             }
@@ -147,10 +260,17 @@ struct ContentView: View {
                     HitRow(hit: hit)
                 }
                 .contextMenu(forSelectionType: Int.self) { ids in
+                    Button("Copy Citation [@key]") { citeHit(ids, .pandoc) }
+                    Button("Copy LaTeX Citation \\cite{key}") { citeHit(ids, .latex) }
+                    CollectionMenu(target: { entryFor(ids) })
+                    if let c = scopeCollection, let e = entryFor(ids) {
+                        Button("Remove from “\(c.name)”") { lib.removeFromCollection(e.key, c) }
+                    }
+                    Divider()
                     Button("Open in Preview") { openFiles(ids) }
                     Button("Show in Finder") { reveal(ids) }
                     Divider()
-                    Button("Remove from Index") { lib.remove(Array(ids)) }
+                    Button("Remove from Index") { lib.remove(Array(ids).filter { $0 > 0 }) }
                 } primaryAction: { ids in
                     openFiles(ids)
                 }
@@ -190,16 +310,19 @@ struct ContentView: View {
 
     var statusBar: some View {
         HStack(spacing: 8) {
-            if let p = lib.progress {
+            if let f = lib.flash {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Text(f).foregroundStyle(.primary).lineLimit(1)
+            } else if let p = lib.progress {
                 ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
                     .frame(width: 70)
                 Text("Indexing \(p.done) of \(p.total)…")
             } else if let err = lib.errorMessage {
                 Text(err).foregroundStyle(.red)
             } else if lib.query.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text("\(lib.scopedCount) PDFs")
+                Text("\(lib.results.count) items")
             } else {
-                Text("\(lib.results.count) of \(lib.scopedCount) PDFs")
+                Text("\(lib.results.count) matches")
             }
             Spacer()
         }
@@ -250,9 +373,24 @@ struct ContentView: View {
     }
 
     var pdfArea: some View {
+        HStack(spacing: 0) {
+            pdfPane
+            if showMargin && viewer.path != nil && entryOnly == nil {
+                Divider()
+                MarginColumn(viewer: viewer)
+                    .frame(width: 290)
+            }
+        }
+    }
+
+    var pdfPane: some View {
         PDFKitView(view: viewer.pdfView)
             .overlay {
-                if viewer.path == nil {
+                if let e = entryOnly {
+                    EntryCard(entry: e, cite: { cite($0) })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                } else if viewer.path == nil {
                     Text(lib.docCount == 0 ? "" : "Select a PDF to see where your words appear")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -266,9 +404,23 @@ struct ContentView: View {
                     .background(Color(nsColor: .windowBackgroundColor))
                 }
             }
-            .navigationTitle(viewer.title)
+            .navigationTitle(entryOnly?.shortCite ?? currentEntry?.shortCite ?? viewer.title)
             .toolbar {
                 ToolbarItemGroup {
+                    Menu {
+                        Button("Copy [@key] for Obsidian / Markdown") { cite(.pandoc) }
+                        Button("Copy \\cite{key} for LaTeX / Overleaf") { cite(.latex) }
+                        Button("Copy Key Only") { cite(.key) }
+                    } label: {
+                        Label("Cite", systemImage: "quote.opening")
+                    } primaryAction: {
+                        cite(.pandoc)
+                    }
+                        .disabled(viewer.path == nil && entryOnly == nil)
+                        .help("Copy citation (⇧⌘C for [@key], ⌥⇧⌘C for \\cite{key})")
+                    CollectionMenu(target: { currentEntry })
+                        .disabled(viewer.path == nil && entryOnly == nil)
+                        .help("Add this paper to a collection (a reading list for something you're writing)")
                     if viewer.matchCount > 0 {
                         Text("\(viewer.matchIndex + 1) of \(viewer.matchCount)")
                             .monospacedDigit()
@@ -282,22 +434,11 @@ struct ContentView: View {
                         .disabled(viewer.matchCount == 0)
                         .keyboardShortcut("g", modifiers: .command)
                         .help("Next match (⌘G)")
-                    Toggle(isOn: $viewer.highlighter) {
-                        Label("Highlighter", systemImage: "highlighter")
+                    Toggle(isOn: $showMargin) {
+                        Label("Notes", systemImage: "sidebar.right")
                     }
                         .toggleStyle(.button)
-                        .disabled(viewer.path == nil)
-                        .help("Highlighter (⌃⌘H): select text to highlight it. Highlights are saved into the PDF.")
-                    Menu {
-                        ForEach(HighlightColor.allCases) { c in
-                            Button { viewer.highlightColor = c } label: {
-                                if viewer.highlightColor == c { Label(c.name, systemImage: "checkmark") } else { Text(c.name) }
-                            }
-                        }
-                    } label: {
-                        Label("Highlight Color", systemImage: "paintpalette")
-                    }
-                        .help("Highlight color")
+                        .help("Show or hide your highlights and notes")
                     Button { viewer.zoomToFit() } label: {
                         Label("Zoom to Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
                     }
@@ -317,7 +458,29 @@ struct ContentView: View {
 
     func showSelected() {
         guard let id = selection, let hit = lib.results.first(where: { $0.id == id }) else { return }
-        viewer.show(path: hit.path, terms: activeTerms, page: hit.page, wholeWords: !findMode)
+        if hit.path.isEmpty {
+            entryOnly = hit.entry
+            viewer.close()
+        } else {
+            entryOnly = nil
+            viewer.show(path: hit.path, terms: activeTerms, page: hit.page, wholeWords: !findMode)
+        }
+    }
+
+    /// the bibliography entry for whatever is on screen
+    var currentEntry: BibEntry? {
+        if let e = entryOnly { return e }
+        return viewer.path.flatMap { lib.bib.entry(forPath: $0) }
+    }
+
+    func cite(_ style: CiteStyle) {
+        if let e = entryOnly { lib.cite(entry: e, path: nil, style: style) }
+        else if let p = viewer.path { lib.cite(entry: lib.bib.entry(forPath: p), path: p, style: style) }
+    }
+
+    func citeHit(_ ids: Set<Int>, _ style: CiteStyle) {
+        guard let id = ids.first, let h = lib.results.first(where: { $0.id == id }) else { return }
+        lib.cite(entry: h.entry, path: h.path.isEmpty ? nil : h.path, style: style)
     }
 
     func openFind() {
@@ -333,7 +496,7 @@ struct ContentView: View {
     }
 
     func paths(_ ids: Set<Int>) -> [URL] {
-        lib.results.filter { ids.contains($0.id) }.map { URL(fileURLWithPath: $0.path) }
+        lib.results.filter { ids.contains($0.id) && !$0.path.isEmpty }.map { URL(fileURLWithPath: $0.path) }
     }
     func openFiles(_ ids: Set<Int>) { paths(ids).forEach { NSWorkspace.shared.open($0) } }
     func reveal(_ ids: Set<Int>) { NSWorkspace.shared.activateFileViewerSelecting(paths(ids)) }
@@ -359,17 +522,82 @@ struct HitRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline) {
-                Text(hit.name).font(.headline).lineLimit(1)
+                Text(hit.displayTitle).font(.headline).lineLimit(2)
                 Spacer(minLength: 6)
                 Text(hit.badge).font(.caption).foregroundStyle(.secondary)
+            }
+            if let e = hit.entry {
+                HStack(spacing: 6) {
+                    Text(e.shortCite).font(.subheadline)
+                    if e.inLibrary {
+                        Text("@" + e.key).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    }
+                }
+                .lineLimit(1)
             }
             if let s = hit.snippet {
                 Text(s).font(.callout).foregroundStyle(.secondary).lineLimit(3)
             }
-            Text(hit.folder).font(.caption2).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.head)
+            if !hit.path.isEmpty {
+                Text(hit.folder).font(.caption2).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.head)
+            }
         }
         .padding(.vertical, 3)
+    }
+}
+
+/// "Add to Collection ▸ <collections> / New Collection…" for one paper or book.
+struct CollectionMenu: View {
+    @EnvironmentObject var lib: Library
+    let target: () -> BibEntry?
+    var body: some View {
+        Menu {
+            ForEach(lib.collections) { c in
+                Button(c.name) { lib.addToCollection(target(), c) }
+            }
+            if !lib.collections.isEmpty { Divider() }
+            Button("New Collection…") { lib.newCollection(adding: target()) }
+        } label: {
+            Label("Add to Collection", systemImage: "text.badge.plus")
+        }
+    }
+}
+
+/// Shown instead of a PDF for library entries without one (books you don't have as PDFs, etc.).
+struct EntryCard: View {
+    let entry: BibEntry
+    let cite: (CiteStyle) -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(entry.kindLabel.uppercased() + " · NO PDF")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(entry.title).font(.title2.weight(.semibold)).textSelection(.enabled)
+            if !entry.people.isEmpty {
+                Text((entry.fields["author"] == nil ? "Edited by " : "") + entry.people.joined(separator: "; "))
+                    .font(.title3).textSelection(.enabled)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(["booktitle", "journal", "publisher", "address", "year", "pages", "edition", "isbn", "doi", "url"], id: \.self) { k in
+                    if let v = entry.fields[k], !v.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(k.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                                .frame(width: 80, alignment: .trailing)
+                            Text(v).textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 4)
+            HStack(spacing: 8) {
+                Button("Copy [@\(entry.key)]") { cite(.pandoc) }
+                Button("Copy \\cite{\(entry.key)}") { cite(.latex) }
+                CollectionMenu(target: { entry }).fixedSize()
+            }
+            .padding(.top, 8)
+        }
+        .padding(32)
+        .frame(maxWidth: 560, alignment: .leading)
     }
 }
 
@@ -399,24 +627,42 @@ enum HighlightColor: String, CaseIterable, Identifiable {
 /// PDFView with "Highlight" / "Remove Highlight" in its right-click menu.
 final class HighlightingPDFView: PDFView {
     var onHighlight: ((PDFSelection) -> Void)?
+    var onHighlightAndNote: ((PDFSelection) -> Void)?
     var onRemove: ((PDFAnnotation) -> Void)?
+    var onEditNote: ((PDFAnnotation) -> Void)?
 
     static func isHighlight(_ a: PDFAnnotation) -> Bool {
         (a.type ?? "").replacingOccurrences(of: "/", with: "") == "Highlight"
+    }
+
+    /// H (no modifier keys) highlights the selected text.
+    override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection([.command, .control, .option])
+        if mods.isEmpty, event.charactersIgnoringModifiers?.lowercased() == "h",
+           let sel = currentSelection, let t = sel.string, t.contains(where: { !$0.isWhitespace }) {
+            onHighlightAndNote?(sel)
+            return
+        }
+        super.keyDown(with: event)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
         var extra: [NSMenuItem] = []
         if let sel = currentSelection, let text = sel.string, text.contains(where: { !$0.isWhitespace }) {
-            let item = NSMenuItem(title: "Highlight", action: #selector(highlightSelectionItem(_:)), keyEquivalent: "")
-            item.target = self
-            extra.append(item)
+            let note = NSMenuItem(title: "Highlight", action: #selector(noteSelectionItem(_:)), keyEquivalent: "")
+            note.target = self
+            extra.append(note)
         }
         let pt = convert(event.locationInWindow, from: nil)
         if let page = page(for: pt, nearest: false) {
             let pagePoint = convert(pt, to: page)
-            if let ann = page.annotation(at: pagePoint), HighlightingPDFView.isHighlight(ann) {
+            if let ann = page.annotation(at: pagePoint), Marginalia.isMarkup(ann) {
+                let edit = NSMenuItem(title: (ann.contents ?? "").isEmpty ? "Add a Note" : "Edit Note",
+                                      action: #selector(editNoteItem(_:)), keyEquivalent: "")
+                edit.target = self
+                edit.representedObject = ann
+                extra.append(edit)
                 let item = NSMenuItem(title: "Remove Highlight", action: #selector(removeHighlightItem(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = ann
@@ -435,6 +681,12 @@ final class HighlightingPDFView: PDFView {
     }
     @objc private func removeHighlightItem(_ sender: NSMenuItem) {
         if let ann = sender.representedObject as? PDFAnnotation { onRemove?(ann) }
+    }
+    @objc private func noteSelectionItem(_ sender: NSMenuItem) {
+        if let sel = currentSelection { onHighlightAndNote?(sel) }
+    }
+    @objc private func editNoteItem(_ sender: NSMenuItem) {
+        if let ann = sender.representedObject as? PDFAnnotation { onEditNote?(ann) }
     }
 }
 
@@ -460,14 +712,18 @@ final class Viewer: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var mouseMonitor: Any?
 
-    /// Highlighter tool: when on, any text you select gets highlighted on mouse-up.
-    @Published var highlighter = false
     @Published var highlightColor: HighlightColor =
         HighlightColor(rawValue: UserDefaults.standard.string(forKey: "highlightColor") ?? "") ?? .yellow {
         didSet { UserDefaults.standard.set(highlightColor.rawValue, forKey: "highlightColor") }
     }
     private var unsaved = false
     private var saveWork: DispatchWorkItem?
+    /// highlights / notes in the open PDF, in page order (shown in the margin column)
+    @Published private(set) var notes: [MarginNote] = []
+    /// the note card to scroll to and put the cursor in
+    @Published var focusNoteID: ObjectIdentifier?
+    /// true while text is selected in the PDF (shows the Highlight button)
+    @Published private(set) var hasSelection = false
 
     init() {
         let nc = NotificationCenter.default
@@ -486,14 +742,30 @@ final class Viewer: ObservableObject {
             self?.flushSave()
         })
         pdfView.onHighlight = { [weak self] sel in self?.addHighlight(sel) }
+        pdfView.onHighlightAndNote = { [weak self] _ in self?.highlightAndComment() }
         pdfView.onRemove = { [weak self] ann in self?.removeHighlight(ann) }
-        // Highlighter mode: after a drag/double-click in the PDF, highlight whatever got selected.
+        pdfView.onEditNote = { [weak self] ann in
+            self?.refreshNotes()
+            self?.focusNoteID = ObjectIdentifier(ann)
+        }
+        observers.append(nc.addObserver(forName: .PDFViewSelectionChanged, object: pdfView, queue: nil) { [weak self] _ in
+            guard let self = self else { return }
+            let t = self.pdfView.currentSelection?.string ?? ""
+            let has = t.contains(where: { !$0.isWhitespace })
+            if has != self.hasSelection { self.hasSelection = has }
+        })
+        // Clicking a highlight in the PDF selects its note card.
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
-            if let self = self, self.highlighter, event.window === self.pdfView.window {
-                let p = self.pdfView.convert(event.locationInWindow, from: nil)
-                if self.pdfView.bounds.contains(p) {
-                    DispatchQueue.main.async { self.highlightCurrentSelection() }
-                }
+            guard let self = self, event.window === self.pdfView.window else { return event }
+            let p = self.pdfView.convert(event.locationInWindow, from: nil)
+            guard self.pdfView.bounds.contains(p), event.clickCount == 1,
+                  let page = self.pdfView.page(for: p, nearest: false) else { return event }
+            let pagePoint = self.pdfView.convert(p, to: page)
+            DispatchQueue.main.async {
+                guard !self.hasSelection,
+                      let ann = page.annotations.last(where: { Marginalia.isMarkup($0) && $0.bounds.contains(pagePoint) })
+                else { return }
+                self.focusNoteID = ObjectIdentifier(ann)
             }
             return event
         }
@@ -501,21 +773,44 @@ final class Viewer: ObservableObject {
 
     // MARK: highlights (saved into the PDF file, like Preview)
 
-    /// ⌃⌘H: highlight the selection if there is one, otherwise switch the highlighter on/off.
-    func highlightKey() {
-        if !highlightCurrentSelection() { highlighter.toggle() }
+    /// H, the Highlight button or ⌃⌘H: highlight the selected text and put the cursor in its note.
+    func highlightAndComment() {
+        guard let sel = pdfView.currentSelection, let text = sel.string, text.contains(where: { !$0.isWhitespace }) else {
+            Library.shared.showFlash("Select some text in the PDF first, then press H")
+            return
+        }
+        let made = addHighlight(sel)
+        hasSelection = false
+        if let a = made.first { focusNoteID = ObjectIdentifier(a) }
+    }
+
+    /// Store a note in its highlight (the PDF's own comment field, so every PDF app shows it).
+    /// Called as you type; the PDF is saved a moment after you stop.
+    func updateComment(_ note: MarginNote, _ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (note.annotation.contents ?? "") != t else { return }
+        note.annotation.contents = t
+        note.annotation.modificationDate = Date()
+        markUnsaved(after: 1.5)
+    }
+
+    func setHighlightColor(_ c: HighlightColor) {
+        highlightColor = c
+    }
+
+    func reveal(_ note: MarginNote) {
+        guard let page = note.annotation.page else { return }
+        pdfView.go(to: note.annotation.bounds.insetBy(dx: -40, dy: -80), on: page)
+    }
+
+    func refreshNotes() {
+        notes = pdfView.document.map(Marginalia.collect) ?? []
     }
 
     @discardableResult
-    private func highlightCurrentSelection() -> Bool {
-        guard let sel = pdfView.currentSelection, let text = sel.string,
-              text.contains(where: { !$0.isWhitespace }) else { return false }
-        addHighlight(sel)
-        return true
-    }
-
-    func addHighlight(_ sel: PDFSelection) {
-        guard pdfView.document != nil else { return }
+    func addHighlight(_ sel: PDFSelection) -> [PDFAnnotation] {
+        guard pdfView.document != nil else { return [] }
+        var made: [PDFAnnotation] = []
         // one annotation per page, one quad per line (like Preview)
         var byPage: [PDFPage: [CGRect]] = [:]
         var order: [PDFPage] = []
@@ -541,22 +836,26 @@ final class Viewer: ObservableObject {
             ann.userName = NSFullUserName()
             ann.modificationDate = Date()
             page.addAnnotation(ann)
+            made.append(ann)
         }
         pdfView.clearSelection()
         markUnsaved()
+        refreshNotes()
+        return made
     }
 
     func removeHighlight(_ ann: PDFAnnotation) {
         ann.page?.removeAnnotation(ann)
         markUnsaved()
+        refreshNotes()
     }
 
-    private func markUnsaved() {
+    private func markUnsaved(after delay: Double = 0.8) {
         unsaved = true
         saveWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.flushSave() }
         saveWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Write the open PDF back to disk (via a temp file, then swap it in).
@@ -570,6 +869,7 @@ final class Viewer: ObservableObject {
         if ok {
             do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp) } catch { ok = false }
         }
+        if ok { Library.shared.afterSave(path: url.path, notes: Marginalia.collect(doc)) }
         if !ok {
             try? FileManager.default.removeItem(at: tmp)
             let alert = NSAlert()
@@ -635,10 +935,13 @@ final class Viewer: ObservableObject {
                 self.matchCount = sels.count
                 self.matchIndex = 0
                 self.pdfView.highlightedSelections = sels.isEmpty ? nil : sels
+                self.focusNoteID = nil
+                self.hasSelection = false
+                self.refreshNotes()
                 if !sels.isEmpty {
                     self.focus(0)
                 } else if let doc = doc {
-                    let idx = keepPage ?? max(page - 1, 0)
+                    let idx = page > 0 ? page - 1 : (keepPage ?? 0)
                     if let p = doc.page(at: min(idx, max(doc.pageCount - 1, 0))) { self.pdfView.go(to: p) }
                 }
             }
@@ -646,6 +949,23 @@ final class Viewer: ObservableObject {
     }
 
     func step(_ delta: Int) { focus(matchIndex + delta) }
+
+    /// Show nothing (used when a library entry without a PDF is selected).
+    func close() {
+        flushSave()
+        gen += 1
+        pdfView.highlightedSelections = nil
+        pdfView.document = nil
+        selections = []
+        notes = []
+        focusNoteID = nil
+        hasSelection = false
+        path = nil
+        missing = false
+        matchCount = 0
+        matchIndex = 0
+        title = "PDF Search"
+    }
 
     private func focus(_ i: Int) {
         guard !selections.isEmpty else { return }
@@ -667,13 +987,50 @@ final class Viewer: ObservableObject {
 
 // MARK: - Library: the index and everything that talks to it
 
-struct Hit: Identifiable {
-    let id: Int
+/// Where the library lives. Defaults work with or without Obsidian; change them in Settings (⌘,).
+enum Paths {
+    static func setting(_ key: String) -> String? {
+        let v = UserDefaults.standard.string(forKey: key)
+        return (v?.isEmpty ?? true) ? nil : v
+    }
+    /// ~/Obsidian Vault, if there is one
+    static var vault: String? {
+        let v = NSHomeDirectory() + "/Obsidian Vault"
+        return FileManager.default.fileExists(atPath: v) ? v : nil
+    }
+    static var papers: String { setting("papersFolder") ?? NSHomeDirectory() + "/Papers" }
+    static var libraryFolder: String { papers + "/Library" }
+    static var libraryBib: String { setting("libraryBib") ?? (vault.map { $0 + "/library.bib" } ?? papers + "/library.bib") }
+    static var notesFolder: String { setting("notesFolder") ?? (vault.map { $0 + "/Literature" } ?? papers + "/Notes") }
+    static var collectionsFolder: String { setting("collectionsFolder") ?? (vault.map { $0 + "/Collections" } ?? papers + "/Collections") }
+    /// write a Markdown note (@key.md) for each annotated paper
+    static var writeNotes: Bool { UserDefaults.standard.object(forKey: "writeNotes") as? Bool ?? true }
+}
+
+enum CiteStyle { case pandoc, latex, key }
+
+struct LinkRequest: Equatable {
     let path: String
+    let page: Int
+    let n: Int
+}
+
+struct Hit: Identifiable {
+    let id: Int                 // file id; negative for library entries without a PDF
+    let path: String            // "" for entries without a PDF
     let page: Int
     let badge: String
     let snippet: AttributedString?
+    var entry: BibEntry? = nil
     var name: String { ((path as NSString).lastPathComponent as NSString).deletingPathExtension }
+    var displayTitle: String {
+        if let t = entry?.title, !t.isEmpty { return t }
+        return path.isEmpty ? (entry?.key ?? "") : name
+    }
+    var sortKey: String {
+        guard let e = entry else { return name }
+        return (e.people.first.map(BibEntry.lastName) ?? "") + " " + e.year + " " + e.title
+    }
     var folder: String {
         let dir = (path as NSString).deletingLastPathComponent
         let home = NSHomeDirectory()
@@ -685,7 +1042,34 @@ struct Folder: Identifiable, Hashable {
     let path: String
     let name: String
     let count: Int
+    var depth = 0          // 0 = a folder you added; 1–2 = folders inside it
+    var isRoot = true
     var id: String { path }
+}
+
+/// A collection: a Markdown note listing papers for something you're writing. Any `@key` in the
+/// file counts (e.g. `- [[@cascone2000aesthetics]] Cascone (2000) The Aesthetics of Failure`).
+struct Collection: Identifiable, Equatable {
+    let name: String
+    let path: String
+    let keys: [String]
+    var id: String { path }
+    var keySet: Set<String> { Set(keys) }
+
+    private static let keyPattern = try! NSRegularExpression(
+        pattern: "(?<![A-Za-z0-9_.])@([A-Za-z0-9_](?:[A-Za-z0-9_:.\\-]*[A-Za-z0-9_])?)")
+
+    /// every @key in the text, in order, without repeats
+    static func keys(in text: String) -> [String] {
+        let ns = text as NSString
+        var seen = Set<String>()
+        var out: [String] = []
+        for m in keyPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let k = ns.substring(with: m.range(at: 1))
+            if seen.insert(k).inserted { out.append(k) }
+        }
+        return out
+    }
 }
 
 final class Library: ObservableObject {
@@ -701,8 +1085,25 @@ final class Library: ObservableObject {
     @Published private(set) var scopedCount = 0
     /// bumped by ⌘F; the window opens its find bar when this changes
     @Published var findRequest = 0
-    /// bumped by ⌃⌘H
-    @Published var highlightRequest = 0
+    /// bumped by ⇧⌘C / ⌥⇧⌘C
+    @Published var citeRequest = 0
+    @Published var citeTexRequest = 0
+    /// bumped by Edit ▸ Highlight Selection (⌃⌘H)
+    @Published var noteRequest = 0
+    /// a pdfsearch://open?file=…&page=… link to show (from an Obsidian note)
+    @Published private(set) var linkRequest: LinkRequest?
+    private var lastLinkTime = Date.distantPast
+    /// everything in library.bib and any reference .bib files (e.g. a conference archive's)
+    @Published private(set) var bib = BibIndex()
+    /// Markdown collections in Paths.collectionsFolder
+    @Published private(set) var collections: [Collection] = []
+    /// short confirmation shown in the status bar ("Copied [@key]")
+    @Published private(set) var flash: String?
+    private var flashGen = 0
+    private let bibQ = DispatchQueue(label: "pdfsearch.bib", qos: .userInitiated)
+    private var bibStamp: [String: Date] = [:]          // only touched on bibQ
+    private var bibForIndex = BibIndex()                  // only touched on writeQ
+    private var indexedPaths = Set<String>()              // NFC paths of indexed PDFs (main thread)
     /// nil = all PDFs, otherwise the path of an added folder
     @Published var scope: String? = UserDefaults.standard.string(forKey: "scope") {
         didSet {
@@ -729,6 +1130,311 @@ final class Library: ObservableObject {
         reader = DB(path: file)
         errorMessage = err
         refresh()
+        // pick up edits to library.bib (or new reference .bib files) whenever the app comes to the front
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.reloadBib()
+            self?.reloadCollections()
+        }
+        reloadCollections()
+    }
+
+    // MARK: collections
+
+    func reloadCollections() {
+        let dir = Paths.collectionsFolder
+        var out: [Collection] = []
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        where f.lowercased().hasSuffix(".md") && !f.hasPrefix(".") {
+            let path = dir + "/" + f
+            let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            out.append(Collection(name: (f as NSString).deletingPathExtension, path: path, keys: Collection.keys(in: text)))
+        }
+        out.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard out != collections else { return }
+        collections = out
+        if let s = scope, out.contains(where: { $0.path == s }) { runSearchNow() }
+    }
+
+    private func noDetailsAlert() {
+        let alert = NSAlert()
+        alert.messageText = "No citation details for this PDF yet"
+        alert.informativeText = "PDF Search only knows the details of items in your library.bib (and reference .bib files inside your Papers folders). Add an entry for it to library.bib, and name the PDF after its key."
+        alert.runModal()
+    }
+
+    /// Append "- [[@key]] Author (Year) Title" to a collection's note.
+    func addToCollection(_ entry: BibEntry?, _ c: Collection) {
+        guard let e0 = entry else { noDetailsAlert(); return }
+        guard let e = ensureInLibrary(e0)?.entry else { return }
+        if c.keys.contains(e.key) { showFlash("Already in \(c.name)"); return }
+        var text = (try? String(contentsOfFile: c.path, encoding: .utf8)) ?? "# \(c.name)\n\n"
+        if !text.hasSuffix("\n") { text += "\n" }
+        text += "- [[@\(e.key)]] \(e.shortCite) \(e.title)\n"
+        do {
+            try text.write(toFile: c.path, atomically: true, encoding: .utf8)
+            reloadCollections()
+            showFlash("Added \(e.shortCite) to \(c.name)")
+        } catch {
+            showFlash("Couldn't write \(c.name).md: \(error.localizedDescription)")
+        }
+    }
+
+    /// Ask for a name, create <name>.md, and optionally add a first item.
+    func newCollection(adding entry: BibEntry?) {
+        let dir = Paths.collectionsFolder
+        let alert = NSAlert()
+        alert.messageText = "New collection"
+        alert.informativeText = "A collection is a list of papers and books for something you're writing. It's saved as a Markdown note in \(dir.replacingOccurrences(of: NSHomeDirectory(), with: "~"))."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.placeholderString = "e.g. Glitch Aesthetics paper"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        guard !name.isEmpty else { return }
+        let path = dir + "/" + name + ".md"
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: path) {
+                try "# \(name)\n\nPapers and books for this project, one per line. PDF Search adds lines here; edit, reorder or comment on them freely.\n\n"
+                    .write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        } catch {
+            showFlash("Couldn't create the collection: \(error.localizedDescription)")
+            return
+        }
+        reloadCollections()
+        if let e = entry, let c = collections.first(where: { $0.path == path }) { addToCollection(e, c) }
+        else { showFlash("Created collection \(name)") }
+    }
+
+    /// Delete the line(s) that mention @key from a collection's note.
+    func removeFromCollection(_ key: String, _ c: Collection) {
+        guard let text = try? String(contentsOfFile: c.path, encoding: .utf8) else { return }
+        let kept = text.components(separatedBy: "\n").filter { !Collection.keys(in: $0).contains(key) }
+        do {
+            try kept.joined(separator: "\n").write(toFile: c.path, atomically: true, encoding: .utf8)
+            reloadCollections()
+            showFlash("Removed from \(c.name)")
+        } catch {
+            showFlash("Couldn't write \(c.name).md: \(error.localizedDescription)")
+        }
+    }
+
+    /// Write <collection>.bib next to the note, with just its entries (for Overleaf, Pandoc…).
+    func makeBibliography(_ c: Collection) {
+        var out = "% Bibliography for \(c.name), made by PDF Search from \(c.name).md\n\n"
+        var n = 0
+        var missing: [String] = []
+        for k in c.keys {
+            guard let e = bib.entries.first(where: { $0.inLibrary && $0.key == k }) else { missing.append(k); continue }
+            var fields = e.raw
+            fields["file"] = nil
+            out += BibWriter.format(type: e.type, key: e.key, fields: fields, file: nil) + "\n"
+            n += 1
+        }
+        let path = (c.path as NSString).deletingPathExtension + ".bib"
+        do {
+            try out.write(toFile: path, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            showFlash("Wrote \(c.name).bib with \(n) entries" + (missing.isEmpty ? "" : " (not in library.bib: " + missing.joined(separator: ", ") + ")"))
+        } catch {
+            showFlash("Couldn't write \(c.name).bib: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: bibliography
+
+    /// Re-read library.bib plus any .bib file in an added folder or the folders directly inside it.
+    func reloadBib(force: Bool = false) {
+        let roots = Array(Set(folders.filter { $0.isRoot }.map(\.path) + [Paths.papers]))
+        let libPath = Paths.libraryBib
+        let collectionsDir = Paths.collectionsFolder
+        bibQ.async {
+            let fm = FileManager.default
+            var files: [(path: String, isLibrary: Bool)] = [(libPath, true)]
+            for root in roots {
+                var dirs = [root]
+                for k in (try? fm.contentsOfDirectory(atPath: root)) ?? [] where !k.hasPrefix(".") {
+                    var isDir: ObjCBool = false
+                    if fm.fileExists(atPath: root + "/" + k, isDirectory: &isDir), isDir.boolValue { dirs.append(root + "/" + k) }
+                }
+                for d in dirs {
+                    if d == collectionsDir { continue }
+                    for f in (try? fm.contentsOfDirectory(atPath: d)) ?? [] where f.lowercased().hasSuffix(".bib") {
+                        let p = d + "/" + f
+                        if p != libPath && !files.contains(where: { $0.path == p }) { files.append((p, false)) }
+                    }
+                }
+            }
+            var stamp: [String: Date] = [:]
+            for f in files {
+                stamp[f.path] = ((try? fm.attributesOfItem(atPath: f.path))?[.modificationDate] as? Date) ?? .distantPast
+            }
+            guard force || stamp != self.bibStamp else { return }
+            self.bibStamp = stamp
+            var all: [BibEntry] = []
+            for f in files {
+                guard let data = fm.contents(atPath: f.path) else { continue }
+                let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+                all += BibParser.parse(text, inLibrary: f.isLibrary)
+            }
+            let index = BibIndex(entries: all)
+            DispatchQueue.main.async {
+                self.bib = index
+                self.runSearchNow()
+            }
+            self.writeQ.async {
+                self.bibForIndex = index
+                self.applyBibToIndex(index)
+            }
+        }
+    }
+
+    /// Make PDFs findable by their title, authors, year and citation key (the "page 0" row of each file).
+    private func applyBibToIndex(_ bib: BibIndex) {
+        var rows: [(Int, String)] = []
+        for (path, k) in writer.knownFiles() {
+            guard let e = bib.entry(forPath: path) else { continue }
+            let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+                .replacingOccurrences(of: "_", with: " ")
+            rows.append((k.id, name + "\n" + e.searchText))
+        }
+        if !rows.isEmpty { writer.setNameRows(rows) }
+    }
+
+    /// Copy a citation for an entry (or the PDF at `path`). Reference entries (e.g. from a conference archive's .bib)
+    /// are first added to library.bib with a new key.
+    func cite(entry: BibEntry?, path: String?, style: CiteStyle) {
+        guard var e = entry ?? path.flatMap({ bib.entry(forPath: $0) }) else {
+            noDetailsAlert()
+            return
+        }
+        var added = false
+        if !e.inLibrary {
+            guard let r = ensureInLibrary(e) else { return }
+            e = r.entry
+            added = r.added
+        }
+        let text: String
+        switch style {
+        case .pandoc: text = "[@\(e.key)]"
+        case .latex: text = "\\cite{\(e.key)}"
+        case .key: text = e.key
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        showFlash("Copied \(text)" + (added ? " · added to library.bib" : ""))
+    }
+
+    /// A reference entry (e.g. from a conference archive) becomes a library entry with a regular key.
+    /// Returns nil if library.bib couldn't be written (an alert explains why).
+    func ensureInLibrary(_ e: BibEntry) -> (entry: BibEntry, added: Bool)? {
+        if e.inLibrary { return (e, false) }
+        // already in the library under another key (same DOI or same PDF)?
+        let doi = e.fields["doi"]?.lowercased()
+        if let existing = bib.entries.first(where: { x in
+            x.inLibrary && ((doi != nil && x.fields["doi"]?.lowercased() == doi) || (x.file != nil && x.file == e.file))
+        }) {
+            return (existing, false)
+        }
+        let key = CiteKey.make(for: e, existing: bib.libraryKeys)
+        var fields = e.raw
+        fields["file"] = nil
+        let text = BibWriter.format(type: e.type, key: key, fields: fields, file: e.file)
+        do {
+            try BibWriter.append(text, to: URL(fileURLWithPath: Paths.libraryBib))
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't add the entry to library.bib"
+            alert.informativeText = "\(Paths.libraryBib)\n\n\(error.localizedDescription)"
+            alert.runModal()
+            return nil
+        }
+        let newEntry = BibEntry(type: e.type, key: key, fields: e.fields, raw: fields, inLibrary: true, file: e.file)
+        bib = BibIndex(entries: bib.entries + [newEntry])
+        reloadBib(force: true)
+        return (newEntry, true)
+    }
+
+    // MARK: margin notes → search index + Obsidian
+
+    /// Called after the open PDF was saved with new/changed highlights or notes.
+    func afterSave(path: String, notes: [MarginNote]) {
+        writeQ.async { self.index([URL(fileURLWithPath: path)]) }   // so new notes are searchable
+        var entry = bib.entry(forPath: path)
+        if let e = entry, !e.inLibrary, !notes.isEmpty { entry = ensureInLibrary(e)?.entry ?? e }
+        Marginalia.mirror(pdfPath: path, entry: entry, notes: notes)
+    }
+
+    /// File ▸ Write Notes for All Annotated PDFs: a note for every PDF that has highlights or notes.
+    func exportAllMarginalia() {
+        showFlash("Writing paper notes…")
+        writeQ.async {
+            let paths = Array(self.writer.knownFiles().keys).sorted()
+            DispatchQueue.global(qos: .utility).async {
+                var written = 0
+                for (i, p) in paths.enumerated() {
+                    autoreleasepool {
+                        guard let doc = PDFDocument(url: URL(fileURLWithPath: p)), !doc.isLocked else { return }
+                        let notes = Marginalia.collect(doc)
+                        guard !notes.isEmpty else { return }
+                        DispatchQueue.main.sync {
+                            var entry = self.bib.entry(forPath: p)
+                            if let e = entry, !e.inLibrary { entry = self.ensureInLibrary(e)?.entry ?? e }
+                            Marginalia.mirror(pdfPath: p, entry: entry, notes: notes)
+                        }
+                        written += 1
+                    }
+                    if i % 100 == 0 {
+                        let n = i
+                        DispatchQueue.main.async { self.showFlash("Writing paper notes… \(n) of \(paths.count) PDFs checked") }
+                    }
+                }
+                let total = written
+                DispatchQueue.main.async {
+                    self.showFlash(Paths.writeNotes ? "Wrote \(total) paper notes to \(Marginalia.folder.replacingOccurrences(of: NSHomeDirectory(), with: "~"))" : "Paper notes are turned off in Settings")
+                }
+            }
+        }
+    }
+
+    /// PDFs/folders opened with the app, and pdfsearch://open?file=…&page=… links from Obsidian notes.
+    func handle(_ urls: [URL]) {
+        var files: [URL] = []
+        for u in urls {
+            if u.scheme == "pdfsearch" {
+                let items = URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                guard let file = items.first(where: { $0.name == "file" })?.value else { continue }
+                let page = Int(items.first(where: { $0.name == "page" })?.value ?? "") ?? 0
+                let path = (file as NSString).expandingTildeInPath
+                // SwiftUI and the app delegate can both deliver the same link
+                if let last = linkRequest, last.path == path, last.page == page,
+                   Date().timeIntervalSince(lastLinkTime) < 1 { continue }
+                lastLinkTime = Date()
+                linkRequest = LinkRequest(path: path, page: page, n: (linkRequest?.n ?? 0) + 1)
+                NSApp.activate(ignoringOtherApps: true)
+            } else if u.isFileURL {
+                files.append(u)
+            }
+        }
+        if !files.isEmpty { add(files) }
+    }
+
+    func showFlash(_ message: String) {
+        flashGen += 1
+        let g = flashGen
+        flash = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if g == self.flashGen { self.flash = nil } }
+    }
+
+    private static func onUnpluggedVolume(_ path: String) -> Bool {
+        guard path.hasPrefix("/Volumes/") else { return false }
+        let parts = path.split(separator: "/")
+        return parts.count >= 2 && !FileManager.default.fileExists(atPath: "/Volumes/" + parts[1])
     }
 
     // MARK: adding & updating
@@ -766,12 +1472,17 @@ final class Library: ObservableObject {
     func refresh() {
         writeQ.async {
             let fm = FileManager.default
+            // ~/Papers is always part of the library
+            if fm.fileExists(atPath: Paths.papers) { self.writer.addFolder(Paths.papers) }
+            // forget added folders that no longer exist (moved or deleted), unless they're on an unplugged drive
+            for f in self.writer.folders() where !fm.fileExists(atPath: f) && !Library.onUnpluggedVolume(f) {
+                self.writer.removeFolder(f)
+            }
             var urls: [URL] = []
             for (path, k) in self.writer.knownFiles() {
                 if fm.fileExists(atPath: path) {
                     urls.append(URL(fileURLWithPath: path))
-                } else if fm.fileExists(atPath: (path as NSString).deletingLastPathComponent) {
-                    // only forget it if its folder is still there (so an unplugged drive doesn't wipe its PDFs)
+                } else if !Library.onUnpluggedVolume(path) {
                     self.writer.removeFile(id: k.id)
                 }
             }
@@ -822,7 +1533,7 @@ final class Library: ObservableObject {
         }
         publishCount()
         guard !todo.isEmpty else {
-            DispatchQueue.main.async { self.progress = nil; self.runSearchNow() }
+            DispatchQueue.main.async { self.progress = nil; self.reloadBib(); self.runSearchNow() }
             return
         }
         let total = todo.count
@@ -850,17 +1561,21 @@ final class Library: ObservableObject {
             }
         }
         ops.waitUntilAllOperationsAreFinished()
+        applyBibToIndex(bibForIndex)
         publishCount()
-        DispatchQueue.main.async { self.progress = nil; self.runSearchNow() }
+        DispatchQueue.main.async { self.progress = nil; self.reloadBib(); self.runSearchNow() }
     }
 
     private func publishCount() {
         let n = writer.count(scope: nil)
         let f = writer.folderList()
+        let paths = Set(writer.knownFiles().keys.map(BibIndex.norm))
         DispatchQueue.main.async {
             self.docCount = n
             self.folders = f
-            if let s = self.scope, !f.contains(where: { $0.path == s }) { self.scope = nil }
+            self.indexedPaths = paths
+            if let s = self.scope, !f.contains(where: { $0.path == s }),
+               !self.collections.contains(where: { $0.path == s }) { self.scope = nil }
         }
     }
 
@@ -912,7 +1627,14 @@ final class Library: ObservableObject {
         guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
         var pages: [String] = []
         pages.reserveCapacity(doc.pageCount)
-        for i in 0..<doc.pageCount { pages.append(doc.page(at: i)?.string ?? "") }
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { pages.append(""); continue }
+            var text = page.string ?? ""
+            // your margin notes are part of the page, so searching finds them
+            let notes = page.annotations.filter(Marginalia.isMarkup).compactMap { $0.contents }.filter { !$0.isEmpty }
+            if !notes.isEmpty { text += "\n" + notes.joined(separator: "\n") }
+            pages.append(text)
+        }
         return pages
     }
 
@@ -930,16 +1652,43 @@ final class Library: ObservableObject {
         searchGen += 1
         let g = searchGen
         let q = query
-        let scope = self.scope
+        let coll = collections.first { $0.path == self.scope }
+        let scope = coll == nil ? self.scope : nil       // a collection searches everything, then filters
+        let bib = self.bib
+        let indexed = self.indexedPaths
         readQ.async {
             let (fts, terms) = Library.parse(q)
-            let hits: [Hit]
-            if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let empty = q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            var hits: [Hit]
+            if empty {
                 hits = self.reader.allFiles(scope: scope)
             } else if fts.isEmpty {
                 hits = []
             } else {
                 hits = self.reader.search(fts, scope: scope)
+            }
+            for i in hits.indices { hits[i].entry = bib.entry(forPath: hits[i].path) }
+            let keySet = coll?.keySet ?? []
+            if coll != nil {
+                hits = hits.filter { h in h.entry.map { $0.inLibrary && keySet.contains($0.key) } ?? false }
+            }
+            // library entries without an indexed PDF (books etc.) belong to the Library folder
+            let lib = Paths.libraryFolder
+            if coll != nil || scope == nil || scope == lib || lib.hasPrefix(scope! + "/") {
+                let folded = terms.map(BibIndex.fold).filter { !$0.isEmpty }
+                for (i, e) in bib.entries.enumerated() where e.inLibrary && (coll == nil || keySet.contains(e.key)) {
+                    if let f = e.file, indexed.contains(BibIndex.norm(f)) { continue }
+                    if indexed.contains(BibIndex.norm(lib + "/" + e.key + ".pdf")) { continue }
+                    if !empty && !Library.entryMatches(bib.searchBlobs[i], folded) { continue }
+                    hits.append(Hit(id: -(i + 1), path: "", page: 0, badge: e.kindLabel + " · no PDF", snippet: nil, entry: e))
+                }
+            }
+            if empty, let c = coll {
+                // a collection lists its items in the order of the note
+                let order = Dictionary(c.keys.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+                hits.sort { (order[$0.entry?.key ?? ""] ?? Int.max) < (order[$1.entry?.key ?? ""] ?? Int.max) }
+            } else if empty {
+                hits.sort { $0.sortKey.localizedStandardCompare($1.sortKey) == .orderedAscending }
             }
             let n = self.reader.count(scope: scope)
             DispatchQueue.main.async {
@@ -972,8 +1721,714 @@ final class Library: ObservableObject {
         return (parts.joined(separator: " "), terms)
     }
 
+    /// Every term must match: a phrase anywhere, a word at the start of a word.
+    static func entryMatches(_ blob: String, _ terms: [String]) -> Bool {
+        for t in terms {
+            if t.contains(" ") {
+                if !blob.contains(t) { return false }
+            } else if !(blob.hasPrefix(t) || blob.contains(" " + t)) {
+                return false
+            }
+        }
+        return true
+    }
+
     private static func hasWordChars(_ s: String) -> Bool {
         s.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
+    }
+}
+
+// MARK: - Bibliography (library.bib + reference .bib files)
+
+/// One BibTeX entry. `fields` holds display-ready text (LaTeX decoded); `raw` holds values as written.
+struct BibEntry: Identifiable {
+    let type: String
+    let key: String
+    let fields: [String: String]
+    let raw: [String: String]
+    let inLibrary: Bool          // true = from library.bib (citable as is); false = a reference collection (e.g. a conference archive)
+    let file: String?            // absolute path to the PDF, if any
+    var id: String { (inLibrary ? "L:" : "R:") + key }
+
+    var title: String { fields["title"] ?? "" }
+    var year: String {
+        let y = fields["year"] ?? fields["date"] ?? ""
+        if let r = y.range(of: "[0-9]{4}", options: .regularExpression) { return String(y[r]) }
+        return ""
+    }
+    /// Authors, or editors when there are no authors.
+    var people: [String] {
+        let s = fields["author"] ?? fields["editor"] ?? ""
+        return s.components(separatedBy: " and ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    static func lastName(_ person: String) -> String {
+        if let comma = person.firstIndex(of: ",") { return String(person[..<comma]).trimmingCharacters(in: .whitespaces) }
+        return person.split(separator: " ").last.map(String.init) ?? person
+    }
+    /// "Cascone (2000)", "Fasciani & Goode (2021)", "Smith et al. (2019)"
+    var shortCite: String {
+        let names = people.map(BibEntry.lastName)
+        let who: String
+        switch names.count {
+        case 0: who = "Anon."
+        case 1: who = names[0]
+        case 2: who = "\(names[0]) & \(names[1])"
+        default: who = "\(names[0]) et al."
+        }
+        return year.isEmpty ? who : "\(who) (\(year))"
+    }
+    var container: String {
+        fields["journal"] ?? fields["journaltitle"] ?? fields["booktitle"] ?? fields["publisher"] ?? ""
+    }
+    /// Text that makes the entry findable by author, title, year and key.
+    var searchText: String {
+        ([key, title, fields["author"] ?? "", fields["editor"] ?? "", year, container]).joined(separator: "\n")
+    }
+    var kindLabel: String {
+        switch type {
+        case "book": return "Book"
+        case "incollection", "inbook": return "Chapter"
+        case "article": return "Article"
+        case "inproceedings", "conference": return "Paper"
+        case "phdthesis", "mastersthesis", "thesis": return "Thesis"
+        default: return type.capitalized
+        }
+    }
+}
+
+/// Everything loaded from the .bib files, looked up by PDF path or file name.
+struct BibIndex {
+    var entries: [BibEntry] = []
+    var byPath: [String: BibEntry] = [:]          // NFC path → entry
+    var libraryByStem: [String: BibEntry] = [:]   // "cascone2000aesthetics" → entry (PDFs named by key)
+    var libraryKeys: Set<String> = []
+    var searchBlobs: [String] = []                 // folded search text, parallel to `entries`
+
+    static func norm(_ path: String) -> String { path.precomposedStringWithCanonicalMapping }
+
+    /// lowercase ASCII words separated by single spaces (for matching typed words against entries)
+    static func fold(_ s: String) -> String {
+        CiteKey.ascii(s).components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    func entry(forPath path: String) -> BibEntry? {
+        if let e = byPath[BibIndex.norm(path)] { return e }
+        let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        return libraryByStem[stem]
+    }
+
+    init() {}
+    init(entries: [BibEntry]) {
+        self.entries = entries
+        searchBlobs = entries.map { BibIndex.fold($0.searchText) }
+        for e in entries {
+            if let f = e.file {
+                let k = BibIndex.norm(f)
+                // library entries win over reference ones for the same PDF
+                if byPath[k] == nil || e.inLibrary { byPath[k] = e }
+            }
+            if e.inLibrary {
+                libraryKeys.insert(e.key)
+                libraryByStem[e.key] = e
+            }
+        }
+    }
+}
+
+enum BibParser {
+    static func parse(_ text: String, inLibrary: Bool) -> [BibEntry] {
+        let b = Array(text.utf8)
+        let n = b.count
+        var i = 0
+        var out: [BibEntry] = []
+        func isSpace(_ c: UInt8) -> Bool { c == 32 || c == 9 || c == 10 || c == 13 }
+        func skipSpace() { while i < n && isSpace(b[i]) { i += 1 } }
+        func str(_ from: Int, _ to: Int) -> String { String(decoding: b[from..<to], as: UTF8.self) }
+        /// i points at an opening brace; returns the content and leaves i after the matching brace
+        func braced() -> String {
+            var depth = 0
+            let start = i + 1
+            while i < n {
+                if b[i] == UInt8(ascii: "{") { depth += 1 }
+                else if b[i] == UInt8(ascii: "}") { depth -= 1; if depth == 0 { i += 1; return str(start, i - 1) } }
+                else if b[i] == UInt8(ascii: "\\") { i += 1 }
+                i += 1
+            }
+            return str(start, n)
+        }
+        func quoted() -> String {
+            let start = i + 1
+            i += 1
+            var depth = 0
+            while i < n {
+                let c = b[i]
+                if c == UInt8(ascii: "{") { depth += 1 }
+                else if c == UInt8(ascii: "}") { depth -= 1 }
+                else if c == UInt8(ascii: "\\") { i += 1 }
+                else if c == UInt8(ascii: "\"") && depth <= 0 { i += 1; return str(start, i - 1) }
+                i += 1
+            }
+            return str(start, n)
+        }
+
+        while i < n {
+            while i < n && b[i] != UInt8(ascii: "@") { i += 1 }
+            guard i < n else { break }
+            i += 1
+            let ts = i
+            while i < n && (isalpha(Int32(b[i])) != 0) { i += 1 }
+            let type = str(ts, i).lowercased()
+            skipSpace()
+            guard i < n, b[i] == UInt8(ascii: "{") || b[i] == UInt8(ascii: "(") else { continue }
+            if type == "comment" || type == "preamble" || type == "string" {
+                if b[i] == UInt8(ascii: "{") { _ = braced() }
+                continue
+            }
+            i += 1
+            skipSpace()
+            let ks = i
+            while i < n && b[i] != UInt8(ascii: ",") && b[i] != UInt8(ascii: "}") && !isSpace(b[i]) { i += 1 }
+            let key = str(ks, i)
+            var raw: [String: String] = [:]
+            // fields
+            while i < n {
+                while i < n && (isSpace(b[i]) || b[i] == UInt8(ascii: ",")) { i += 1 }
+                guard i < n else { break }
+                if b[i] == UInt8(ascii: "}") || b[i] == UInt8(ascii: ")") { i += 1; break }
+                let ns = i
+                while i < n && b[i] != UInt8(ascii: "=") && b[i] != UInt8(ascii: ",") && b[i] != UInt8(ascii: "}") && !isSpace(b[i]) { i += 1 }
+                let name = str(ns, i).lowercased()
+                skipSpace()
+                guard i < n, b[i] == UInt8(ascii: "=") else { continue }
+                i += 1
+                var value = ""
+                while true {
+                    skipSpace()
+                    guard i < n else { break }
+                    if b[i] == UInt8(ascii: "{") { value += braced() }
+                    else if b[i] == UInt8(ascii: "\"") { value += quoted() }
+                    else {
+                        let vs = i
+                        while i < n && b[i] != UInt8(ascii: ",") && b[i] != UInt8(ascii: "}") && b[i] != UInt8(ascii: "#") && !isSpace(b[i]) { i += 1 }
+                        value += str(vs, i)
+                    }
+                    skipSpace()
+                    if i < n && b[i] == UInt8(ascii: "#") { i += 1; continue }
+                    break
+                }
+                if !name.isEmpty { raw[name] = value }
+            }
+            guard !key.isEmpty else { continue }
+            var fields: [String: String] = [:]
+            for (k, v) in raw { fields[k] = (k == "url" || k == "doi" || k == "file") ? v.trimmingCharacters(in: .whitespacesAndNewlines) : decodeLaTeX(v) }
+            out.append(BibEntry(type: type, key: key, fields: fields, raw: raw, inLibrary: inLibrary,
+                                file: filePath(fields["file"])))
+        }
+        return out
+    }
+
+    /// Accepts "/path/x.pdf", "~/x.pdf", or JabRef/Zotero style ":/path/x.pdf:PDF;…".
+    static func filePath(_ value: String?) -> String? {
+        guard let v = value, !v.isEmpty else { return nil }
+        for part in v.components(separatedBy: ";") {
+            var p = part.trimmingCharacters(in: .whitespaces)
+            if let r = p.range(of: ".pdf", options: [.caseInsensitive, .backwards]) { p = String(p[..<r.upperBound]) }
+            if let s = p.firstIndex(where: { $0 == "/" || $0 == "~" }) { p = String(p[s...]) }
+            guard p.lowercased().hasSuffix(".pdf") else { continue }
+            p = (p as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: p).standardizedFileURL.path
+        }
+        return nil
+    }
+
+    private static let accentMarks: [Character: String] = [
+        "'": "\u{301}", "`": "\u{300}", "^": "\u{302}", "\"": "\u{308}", "~": "\u{303}", "=": "\u{304}",
+        ".": "\u{307}", "u": "\u{306}", "v": "\u{30C}", "H": "\u{30B}", "c": "\u{327}", "k": "\u{328}", "r": "\u{30A}"]
+    private static let specials: [String: String] = [
+        "ss": "ß", "o": "ø", "O": "Ø", "aa": "å", "AA": "Å", "ae": "æ", "AE": "Æ", "oe": "œ", "OE": "Œ",
+        "l": "ł", "L": "Ł", "i": "ı", "j": "ȷ"]
+
+    /// Light LaTeX → text: accents, escaped symbols, dashes, braces.
+    static func decodeLaTeX(_ s: String) -> String {
+        guard s.contains("\\") || s.contains("{") || s.contains("--") || s.contains("~") else {
+            return s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        let c = Array(s)
+        var out = ""
+        var i = 0
+        /// the letter an accent applies to, starting at index j: "e", "{e}", " e", "{\\i}"; returns (letter, next index)
+        func accentTarget(_ start: Int) -> (Character, Int)? {
+            var j = start
+            while j < c.count && c[j] == " " { j += 1 }
+            guard j < c.count else { return nil }
+            if c[j] == "{" {
+                var k = j + 1
+                if k < c.count && c[k] == "\\" { k += 1 }
+                guard k < c.count, c[k].isLetter else { return nil }
+                let letter = c[k]
+                var e = k + 1
+                while e < c.count && c[e] != "}" { e += 1 }
+                return (letter, min(e + 1, c.count))
+            }
+            return c[j].isLetter ? (c[j], j + 1) : nil
+        }
+        while i < c.count {
+            let ch = c[i]
+            if ch == "\\" && i + 1 < c.count {
+                let nx = c[i + 1]
+                let symbolAccent = "'`^\"~=.".contains(nx)
+                let letterAccent = "uvHckr".contains(nx) && i + 2 < c.count && (c[i + 2] == "{" || c[i + 2] == " ")
+                if symbolAccent || letterAccent, let mark = accentMarks[nx], let target = accentTarget(i + 2) {
+                    out += String(target.0) + mark
+                    i = target.1
+                    continue
+                }
+                var k = i + 1
+                while k < c.count && c[k].isLetter { k += 1 }
+                let word = String(c[(i + 1)..<k])
+                if let sp = specials[word] {
+                    out += sp
+                    i = k
+                    if i < c.count && c[i] == " " { i += 1 }   // "\\ss " eats one space
+                    continue
+                }
+                if !word.isEmpty { i = k; continue }   // unknown command (\\textit…): drop it, keep the argument
+                out.append(nx)                          // \\& \\% \\_ \\# \\$ \\{ \\}
+                i += 2
+                continue
+            }
+            if ch == "{" || ch == "}" { i += 1; continue }
+            out.append(ch == "~" ? " " : ch)
+            i += 1
+        }
+        out = out.replacingOccurrences(of: "---", with: "—").replacingOccurrences(of: "--", with: "–")
+        return out.precomposedStringWithCanonicalMapping
+            .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+}
+
+/// Citation keys: last name + year + first meaningful title word, all lowercase ASCII.
+/// e.g. Cascone (2000) "The Aesthetics of Failure" → cascone2000aesthetics.
+/// The same rule is used by the one-time Zotero import script; keep them in sync.
+enum CiteKey {
+    static let stopwords: Set<String> = [
+        "a", "an", "the", "on", "of", "in", "for", "and", "to", "toward", "towards", "with", "from", "at", "by",
+        "into", "about", "via", "is", "are", "as", "what", "how", "why", "when", "do", "does", "can", "some",
+        "its", "it", "this", "that", "these", "those", "or", "vs", "versus", "le", "la", "les", "el", "los",
+        "las", "der", "die", "das", "den", "ein", "eine", "und", "von", "zu", "im", "di", "da", "de", "du", "des"]
+
+    static func ascii(_ s: String) -> String {
+        var t = s.replacingOccurrences(of: "ß", with: "ss").replacingOccurrences(of: "æ", with: "ae")
+            .replacingOccurrences(of: "Æ", with: "ae").replacingOccurrences(of: "œ", with: "oe")
+            .replacingOccurrences(of: "ø", with: "o").replacingOccurrences(of: "Ø", with: "o")
+            .replacingOccurrences(of: "ł", with: "l").replacingOccurrences(of: "Ł", with: "l")
+            .replacingOccurrences(of: "đ", with: "d").replacingOccurrences(of: "þ", with: "th")
+        t = t.applyingTransform(.stripDiacritics, reverse: false) ?? t
+        return t.lowercased()
+    }
+
+    static func make(lastName: String, year: String, title: String, existing: Set<String>) -> String {
+        let name = String(ascii(lastName).unicodeScalars.filter { ("a"..."z").contains($0) || ("0"..."9").contains($0) }.map { Character($0) })
+        let y = year.range(of: "[0-9]{4}", options: .regularExpression).map { String(year[$0]) } ?? "nd"
+        let words = ascii(title).components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        let word = words.first { !stopwords.contains($0) } ?? ""
+        let base = (name.isEmpty ? "anon" : name) + y + word
+        if !existing.contains(base) { return base }
+        for suffix in "bcdefghijklmnopqrstuvwxyz" where !existing.contains(base + String(suffix)) {
+            return base + String(suffix)
+        }
+        return base + String(Int.random(in: 100...999))
+    }
+
+    static func make(for e: BibEntry, existing: Set<String>) -> String {
+        make(lastName: e.people.first.map(BibEntry.lastName) ?? "", year: e.year, title: e.title, existing: existing)
+    }
+}
+
+enum BibWriter {
+    static let order = ["author", "editor", "title", "booktitle", "journal", "journaltitle", "chapter", "edition",
+                        "volume", "number", "series", "pages", "publisher", "school", "institution", "address",
+                        "year", "month", "date", "doi", "isbn", "issn", "url", "urldate", "note"]
+
+    /// Escape characters LaTeX would choke on (not for url/doi/file).
+    static func escape(_ v: String) -> String {
+        var s = ""
+        var prev: Character = " "
+        for ch in v {
+            if "&%#_".contains(ch) && prev != "\\" { s.append("\\") }
+            s.append(ch)
+            prev = ch
+        }
+        return s.replacingOccurrences(of: "–", with: "--").replacingOccurrences(of: "—", with: "---")
+    }
+
+    static func format(type: String, key: String, fields: [String: String], file: String?) -> String {
+        var lines: [String] = []
+        let verbatim: Set<String> = ["url", "doi", "file"]
+        var keys = order.filter { fields[$0] != nil }
+        keys += fields.keys.filter { !order.contains($0) && $0 != "file" }.sorted()
+        for k in keys {
+            guard let v = fields[k], !v.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            lines.append("  \(k) = {\(verbatim.contains(k) ? v : escape(v))}")
+        }
+        if let f = file { lines.append("  file = {\(f)}") }
+        return "@\(type){\(key),\n" + lines.joined(separator: ",\n") + "\n}\n"
+    }
+
+    /// Appends an entry to the end of library.bib (creating it if needed).
+    static func append(_ text: String, to url: URL) throws {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            try ("% library.bib: written by PDF Search. One entry per item; keys never change.\n\n" + text)
+                .write(to: url, atomically: true, encoding: .utf8)
+            return
+        }
+        let h = try FileHandle(forWritingTo: url)
+        defer { try? h.close() }
+        try h.seekToEnd()
+        try h.write(contentsOf: ("\n" + text).data(using: .utf8)!)
+    }
+}
+
+/// `PDFSearch --selftest` (run by build.sh): exercises the bibliography code and prints results to the build log.
+enum SelfTest {
+    static func run() {
+        let sample = """
+        @article{x, author = {M{\\"u}ller, J{\\'e}r{\\^o}me and O'Brien, Pat}, title = {The {Aesthetics} of Failure: Post-Digital Tendencies},
+          journal = {Computer Music Journal}, year = 2000, pages = {12--18}}
+        @comment{ignore me}
+        @book{y, editor = "Collins, Nicolas", title = "Handmade Electronic Music \\& More", year = {2006},
+          publisher = {Routledge}, file = {:/Users/x/Papers/Library/y.pdf:PDF}}
+        @incollection{z, author = {Fasciani, Stefano and Goode, Jackson and Third, A.}, title = {20 {Years} of Interfaces}, booktitle = {Proc. ICMC}, year = {2021}}
+        @misc{w, author = {\\v{S}iška, Martin and Ø{\\ss}e, K}, title = {On the {\\textit{Glitch}}}, date = {2019-04-01}}
+        """
+        let es = BibParser.parse(sample, inLibrary: true)
+        print("SELFTEST parsed \(es.count) entries (expect 4)")
+        var keys = Set<String>()
+        for e in es {
+            let k = CiteKey.make(for: e, existing: keys)
+            keys.insert(k)
+            print("SELFTEST \(e.type) \(e.key) | title=\(e.title) | people=\(e.people) | cite=\(e.shortCite) | newkey=\(k) | file=\(e.file ?? "-")")
+        }
+        print("SELFTEST clash: " + CiteKey.make(lastName: "Cascone", year: "2000", title: "The Aesthetics of Failure", existing: ["cascone2000aesthetics"]))
+        print("SELFTEST fold: " + BibIndex.fold("Müller, Jérôme (2000) The Aesthetics"))
+        print("SELFTEST write:\n" + BibWriter.format(type: "book", key: "k", fields: ["title": "A & B – C", "author": "Smith, J", "url": "http://x.org/a_b"], file: "/p/k.pdf"))
+        let round = BibParser.parse(BibWriter.format(type: "book", key: "k", fields: ["title": "A & B – C"], file: "/p/k.pdf"), inLibrary: true)
+        print("SELFTEST roundtrip: \(round.first?.title ?? "FAIL") file=\(round.first?.file ?? "-")")
+        print("SELFTEST collection keys: \(Collection.keys(in: "- [[@cascone2000aesthetics]] x\n- [@menkman2011glitch, p. 3] mail me@x.com\n@collins2006handmade. and @cascone2000aesthetics again"))")
+        let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)
+        let back = URLComponents(string: link)?.queryItems?.first(where: { $0.name == "file" })?.value ?? "FAIL"
+        print("SELFTEST link: \(link)\nSELFTEST link decodes to: \(back)")
+        for p in [Paths.libraryBib] {
+            guard let t = try? String(contentsOfFile: p, encoding: .utf8) else { print("SELFTEST (no file) \(p)"); continue }
+            let fs = BibParser.parse(t, inLibrary: true)
+            let withFile = fs.filter { $0.file != nil }
+            let present = withFile.filter { FileManager.default.fileExists(atPath: $0.file!) }
+            print("SELFTEST file \(p): \(fs.count) entries, \(withFile.count) with a PDF path, \(present.count) of those exist; first: \(fs.first.map { $0.shortCite + " " + $0.title } ?? "-")")
+        }
+    }
+}
+
+// MARK: - Marginalia: highlights + notes in the PDF, mirrored into Obsidian
+
+struct MarginNote: Identifiable {
+    let annotation: PDFAnnotation
+    let pageIndex: Int
+    let pageLabel: String       // the printed page number when the PDF has one
+    let quote: String
+    let comment: String
+    let color: NSColor
+    var id: ObjectIdentifier { ObjectIdentifier(annotation) }
+}
+
+enum Marginalia {
+    static let markupTypes: Set<String> = ["Highlight", "Underline", "StrikeOut", "Squiggly", "Text", "FreeText"]
+    static func isMarkup(_ a: PDFAnnotation) -> Bool {
+        markupTypes.contains((a.type ?? "").replacingOccurrences(of: "/", with: ""))
+    }
+    /// folder for paper notes (Obsidian vault/Literature, or ~/Papers/Notes without Obsidian)
+    static var folder: String { Paths.notesFolder }
+    static let startMarker = "<!-- marginalia:start -->"
+    static let endMarker = "<!-- marginalia:end -->"
+
+    /// All highlights and notes in a PDF, in reading order.
+    static func collect(_ doc: PDFDocument) -> [MarginNote] {
+        var out: [MarginNote] = []
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            let label = page.label.flatMap { $0.isEmpty ? nil : $0 } ?? String(i + 1)
+            let anns = page.annotations.filter(isMarkup).sorted { a, b in
+                if abs(a.bounds.maxY - b.bounds.maxY) > 3 { return a.bounds.maxY > b.bounds.maxY }
+                return a.bounds.minX < b.bounds.minX
+            }
+            for a in anns {
+                out.append(MarginNote(annotation: a, pageIndex: i, pageLabel: label, quote: quote(a, page),
+                                      comment: (a.contents ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                                      color: a.color))
+            }
+        }
+        return out
+    }
+
+    /// The text under a highlight, line by line.
+    static func quote(_ a: PDFAnnotation, _ page: PDFPage) -> String {
+        let t = (a.type ?? "").replacingOccurrences(of: "/", with: "")
+        if t == "Text" || t == "FreeText" { return "" }
+        var rects: [CGRect] = []
+        if let q = a.quadrilateralPoints, q.count >= 4 {
+            for k in stride(from: 0, to: q.count - 3, by: 4) {
+                let pts = q[k..<(k + 4)].map { $0.pointValue }
+                let xs = pts.map { $0.x }, ys = pts.map { $0.y }
+                if let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() {
+                    rects.append(CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+                }
+            }
+        }
+        func text(_ rs: [CGRect]) -> String {
+            rs.compactMap { r in page.selection(for: r.insetBy(dx: 0, dy: r.height * 0.25))?.string }.joined(separator: " ")
+        }
+        func blank(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var s = ""
+        if !rects.isEmpty {
+            s = text(rects.map { $0.offsetBy(dx: a.bounds.minX, dy: a.bounds.minY) })   // PDFKit: relative to the annotation
+            if blank(s) { s = text(rects) }                                               // some files: page coordinates
+        }
+        if blank(s) { s = page.selection(for: a.bounds)?.string ?? "" }
+        s = s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        // re-join words hyphenated across lines ("compo- sition")
+        if let re = try? NSRegularExpression(pattern: "([a-z])- ([a-z])") {
+            s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "$1$2")
+        }
+        return s
+    }
+
+    /// pdfsearch://open?file=…&page=… (opens PDF Search at that page)
+    static func link(path: String, page: Int) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~/")
+        let f = path.addingPercentEncoding(withAllowedCharacters: allowed) ?? path
+        return "pdfsearch://open?file=\(f)&page=\(page)"
+    }
+
+    static func yaml(_ s: String) -> String {
+        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    static func header(pdfPath: String, entry: BibEntry?, key: String) -> String {
+        let stem = ((pdfPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        var h = "---\n"
+        if let e = entry {
+            h += "citekey: \(e.key)\n"
+            h += "title: \(yaml(e.title))\n"
+            if !e.people.isEmpty { h += "authors: \(yaml(e.people.joined(separator: "; ")))\n" }
+            if !e.year.isEmpty { h += "year: \(e.year)\n" }
+        }
+        h += "pdf: \(yaml(pdfPath))\n---\n\n"
+        let title = (entry?.title).flatMap { $0.isEmpty ? nil : $0 } ?? stem
+        h += "# \(title)\n\n"
+        var bits: [String] = []
+        if let e = entry { bits.append(e.shortCite); bits.append("`[@\(e.key)]`") }
+        bits.append("[Open in PDF Search](\(link(path: pdfPath, page: 1)))")
+        return h + bits.joined(separator: " · ") + "\n\n"
+    }
+
+    static func block(pdfPath: String, entry: BibEntry?, notes: [MarginNote]) -> String {
+        var b = startMarker + "\n## Marginalia\n"
+        b += "*Updated automatically from the highlights and margin notes in the PDF. Write marginalia in PDF Search; write your own notes below this section — they're never touched.*\n\n"
+        if notes.isEmpty { b += "*(no highlights yet)*\n\n" }
+        for n in notes {
+            let pageLink = "[p. \(n.pageLabel)](\(link(path: pdfPath, page: n.pageIndex + 1)))"
+            let cite = entry.map { " [@\($0.key), p. \(n.pageLabel)]" } ?? ""
+            if !n.quote.isEmpty {
+                b += "> “\(n.quote)” (\(pageLink))\(cite)\n\n"
+            } else {
+                b += "**\(pageLink)**\(cite)\n\n"
+            }
+            if !n.comment.isEmpty { b += n.comment + "\n\n" }
+        }
+        return b + endMarker
+    }
+
+    /// Create or update <notes folder>/@key.md. Only the marginalia block is rewritten.
+    static func mirror(pdfPath: String, entry: BibEntry?, notes: [MarginNote]) {
+        let stem = ((pdfPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        let key = entry?.key ?? stem
+        let name = "@" + key.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-") + ".md"
+        let fm = FileManager.default
+        let url = URL(fileURLWithPath: folder).appendingPathComponent(name)
+        let exists = fm.fileExists(atPath: url.path)
+        guard Paths.writeNotes, exists || !notes.isEmpty else { return }
+        do {
+            try fm.createDirectory(atPath: folder, withIntermediateDirectories: true)
+            let newBlock = block(pdfPath: pdfPath, entry: entry, notes: notes)
+            var text = exists ? ((try? String(contentsOf: url, encoding: .utf8)) ?? "") : ""
+            if text.isEmpty {
+                text = header(pdfPath: pdfPath, entry: entry, key: key) + newBlock + "\n\n## Notes\n\n"
+            } else if let s = text.range(of: startMarker),
+                      let e = text.range(of: endMarker, range: s.upperBound..<text.endIndex) {
+                text.replaceSubrange(s.lowerBound..<e.upperBound, with: newBlock)
+            } else {
+                text += "\n\n" + newBlock + "\n"
+            }
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            Library.shared.showFlash("Couldn't write the paper note: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// The notes column beside the PDF: every highlight with its note, in page order.
+struct MarginColumn: View {
+    @ObservedObject var viewer: Viewer
+    var body: some View {
+        VStack(spacing: 0) {
+            // header: title + highlight colour
+            HStack(spacing: 6) {
+                Text("Highlights & Notes").font(.headline)
+                Spacer()
+                ForEach(HighlightColor.allCases) { c in
+                    Circle()
+                        .fill(Color(nsColor: c.nsColor.withAlphaComponent(1)))
+                        .frame(width: 14, height: 14)
+                        .overlay(Circle().stroke(Color.primary.opacity(viewer.highlightColor == c ? 0.8 : 0), lineWidth: 2).padding(-3))
+                        .onTapGesture { viewer.setHighlightColor(c) }
+                        .help("Highlight in \(c.name.lowercased())")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+
+            // the one action, shown whenever text is selected
+            if viewer.hasSelection {
+                Button { viewer.highlightAndComment() } label: {
+                    HStack {
+                        Image(systemName: "highlighter")
+                        Text("Highlight selected text")
+                        Spacer()
+                        Text("H").font(.callout.monospaced().weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.25)))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+            }
+            Divider()
+
+            if viewer.notes.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No highlights yet").font(.callout.weight(.medium))
+                    Text("Select a passage in the PDF, then press H.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                Spacer()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(viewer.notes) { n in
+                                NoteCard(note: n, viewer: viewer).id(n.id)
+                            }
+                        }
+                        .padding(10)
+                    }
+                    .onChange(of: viewer.focusNoteID) { id in
+                        if let id = id { withAnimation { proxy.scrollTo(id, anchor: .center) } }
+                    }
+                }
+            }
+
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Select text, then press H to highlight it", systemImage: "highlighter")
+                Label("Type a note under a highlight. It saves itself", systemImage: "square.and.pencil")
+                Label("Click a page number to go to the passage", systemImage: "arrow.turn.down.right")
+                Label("Trash button removes a highlight and its note", systemImage: "trash")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// One highlight: page, passage, a note box that's always ready to type in, and a Remove button.
+struct NoteCard: View {
+    let note: MarginNote
+    @ObservedObject var viewer: Viewer
+    @State private var text = ""
+    @State private var loaded = false
+    @FocusState private var focused: Bool
+
+    /// rough height for the note box: grows with the text, never huge
+    private var boxHeight: CGFloat {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { max(1, Int(ceil(Double($0.count) / 34.0))) }
+            .reduce(0, +)
+        return min(240, max(52, CGFloat(lines) * 17 + 18))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color(nsColor: note.color.withAlphaComponent(1)))
+                    .frame(width: 12, height: 12)
+                Button("Page \(note.pageLabel)") { viewer.reveal(note) }
+                    .buttonStyle(.link)
+                    .help("Go to this passage")
+                Spacer()
+                Button(role: .destructive) { viewer.removeHighlight(note.annotation) } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove this highlight and its note")
+            }
+            if !note.quote.isEmpty {
+                Text(note.quote)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(5)
+                    .onTapGesture { viewer.reveal(note) }
+            }
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $text)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .focused($focused)
+                    .padding(4)
+                if text.isEmpty {
+                    Text("Write a note…")
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(height: boxHeight)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(focused ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: focused ? 2 : 1))
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.15)))
+        .onAppear {
+            if !loaded { text = note.comment; loaded = true }
+            if viewer.focusNoteID == note.id { DispatchQueue.main.async { focused = true; viewer.focusNoteID = nil } }
+        }
+        .onChange(of: text) { t in if loaded { viewer.updateComment(note, t) } }
+        .onChange(of: viewer.focusNoteID) { id in
+            if id == note.id { DispatchQueue.main.async { focused = true; viewer.focusNoteID = nil } }
+        }
     }
 }
 
@@ -1050,18 +2505,58 @@ final class DB {
         return (" AND files.path >= ? AND files.path < ?", [s + "/", s + "0"])
     }
 
+    /// Added folders plus up to two levels of folders inside them (skipped when there are more than 40,
+    /// e.g. Zotero's storage folders).
     func folderList() -> [Folder] {
-        var rows: [(String, String?)] = []
+        var roots: [(path: String, name: String)] = []
         if let st = prepare("SELECT path, name FROM folders") {
             while st.step() {
                 let name = sqlite3_column_type(st.s, 1) == SQLITE_NULL ? nil : st.text(1)
-                rows.append((st.text(0), name))
+                roots.append((st.text(0), name ?? DB.defaultName(st.text(0))))
             }
         }
-        return rows.map { path, name in
-            Folder(path: path, name: name ?? DB.defaultName(path), count: count(scope: path))
+        roots.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        var paths: [String] = []
+        if let st = prepare("SELECT path FROM files") { while st.step() { paths.append(st.text(0)) } }
+        func sorted(_ names: [String]) -> [String] { names.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
+
+        var out: [Folder] = []
+        var seen = Set<String>()
+        for root in roots {
+            let prefix = root.path + "/"
+            var count = 0
+            var level1: [String: Int] = [:]
+            var level2: [String: [String: Int]] = [:]
+            for p in paths where p.hasPrefix(prefix) {
+                count += 1
+                let rel = p.dropFirst(prefix.count).split(separator: "/")
+                guard rel.count >= 2 else { continue }
+                let a = String(rel[0])
+                level1[a, default: 0] += 1
+                if rel.count >= 3 { level2[a, default: [:]][String(rel[1]), default: 0] += 1 }
+            }
+            if seen.insert(root.path).inserted {
+                out.append(Folder(path: root.path, name: root.name, count: count))
+            }
+            guard level1.count <= 40 else { continue }
+            for a in sorted(Array(level1.keys)) where seen.insert(prefix + a).inserted {
+                out.append(Folder(path: prefix + a, name: a, count: level1[a] ?? 0, depth: 1, isRoot: false))
+                guard let kids = level2[a], kids.count <= 40 else { continue }
+                for b in sorted(Array(kids.keys)) where seen.insert(prefix + a + "/" + b).inserted {
+                    out.append(Folder(path: prefix + a + "/" + b, name: b, count: kids[b] ?? 0, depth: 2, isRoot: false))
+                }
+            }
         }
-        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return out
+    }
+
+    /// Replace the "page 0" text (file name + bibliography details) of several files at once.
+    func setNameRows(_ rows: [(Int, String)]) {
+        exec("BEGIN")
+        if let st = prepare("UPDATE fts SET body=? WHERE rowid=?") {
+            for (id, text) in rows { st.bind([text, id * PAGE_SLOTS]); st.step(); st.reset() }
+        }
+        exec("COMMIT")
     }
 
     static func defaultName(_ path: String) -> String {
