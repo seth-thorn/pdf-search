@@ -29,6 +29,7 @@ INSTALL
 
 GET STARTED
 -----------
+- Drag a PDF onto the window to add it: PDF Search looks up its citation details and files it.
 - Put your PDFs in a folder called "Papers" in your home folder (your own papers in Papers/Library).
   PDF Search reads every PDF once (a progress bar shows how far it's got); after that, searches
   are instant. You can also drag any folder of PDFs into the window.

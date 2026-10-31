@@ -4,9 +4,10 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 
 <img src="dist/icon.png" width="96" align="right" alt="">
 
+- **Add papers and books in one step.** Drop a PDF on the window: PDF Search finds its DOI (or arXiv ID, ISBN, or title), fetches the citation details from doi.org / Crossref / Open Library, shows them on a card to check, then files the PDF as `~/Papers/Library/<key>.pdf` and adds it to `library.bib`. Books without a PDF: type the ISBN.
 - **Search everything.** Every word of every PDF in your `~/Papers` folder, as you type, with snippets and page counts. Prefix matching, `"exact phrases"`, and accents/case ignored. Search one folder or all of them.
 - **Read.** Click a result and the PDF opens at the first match, with every match marked. ⌘G steps through them, and ⌘F finds within the open PDF.
-- **Write in the margins.** Select a passage and press **H**. It's highlighted, and a note box opens in the notes column beside the PDF. Every highlight has a note box, which saves as you type. Each highlight has a clear Remove button. Notes are saved *inside the PDF* as standard comments, so Preview, Acrobat and other apps see them too, and they're searchable.
+- **Write in the margins.** Select a passage and press **H**. It's highlighted, and a note box opens in the notes column beside the PDF. Every highlight has a note box, which saves as you type. Each highlight has a clear Remove button. An **About this paper** box holds notes on the whole paper. Notes are saved *inside the PDF* as standard comments, so Preview, Acrobat and other apps see them too, and they're searchable.
 - **Cite.** PDFs are matched to entries in a plain `library.bib`, so results show real titles and authors. ⇧⌘C copies `[@cascone2000aesthetics]` (Markdown/Pandoc), and ⌥⇧⌘C copies `\cite{cascone2000aesthetics}` (LaTeX/Overleaf). Books you don't have as PDFs live in the same bibliography.
 - **Collections.** A reading list for each thing you're writing, kept as a plain Markdown note (`- [[@key]] Author (Year) Title`). Add papers with one click, browse a collection like a folder, and turn it into a `.bib` file for Overleaf or Pandoc.
 - **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote, a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
@@ -43,6 +44,8 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 
 **Citation keys** are last name + year + the first meaningful word of the title, all lowercase: `cascone2000aesthetics`, `collins2006handmade`. If two items would get the same key, the second gets a letter (`…b`).
 
+**Adding papers:** drag a PDF onto the window (or **+ → Add Paper**, ⌘O), check the card, press **Add to Library**. **+ → Add Book or Chapter** (⇧⌘O) looks up an ISBN. Right-click a PDF without details → **Look Up Citation Details…**. To make a folder searchable without adding it to your bibliography: **+ → Add Folder to Search…**.
+
 **Coming from Zotero?** [`tools/import_zotero.py`](tools/) copies your Zotero library into `~/Papers/Library` and writes `library.bib` with fresh keys. It also writes the highlights you made in Zotero's reader into the PDFs. Zotero itself is only read, never changed. See [tools/README.md](tools/README.md).
 
 ## Everyday use
@@ -54,7 +57,8 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 | ⌘G / ⇧⌘G | next / previous match |
 | H | highlight the selected text (a note box opens beside it), also ⌃⌘H |
 | ⇧⌘C / ⌥⇧⌘C | copy `[@key]` / `\cite{key}` for the open paper |
-| ⌘O / ⌘R | add PDFs or folders / rescan folders |
+| ⌘O / ⇧⌘O | add a paper (PDF) / add a book or chapter (ISBN) |
+| ⌘R | rescan folders |
 | ⌘0 | zoom to fit |
 | ⌘, | settings: papers folder, `library.bib` location, notes and collections folders |
 

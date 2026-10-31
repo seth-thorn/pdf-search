@@ -6,7 +6,7 @@ It has no dependencies, no Xcode project and no package manager.
 ## Files
 
 - `PDFSearch.swift`: the entire app (~2,500 lines).
-- `Info.plist`: bundle metadata (bundle id `local.pdfsearch`, version 2.0, min macOS 13; accepts PDFs/folders dropped on the Dock icon; registers the `pdfsearch://` URL scheme).
+- `Info.plist`: bundle metadata (bundle id `local.pdfsearch`, version 2.1, min macOS 13; accepts PDFs/folders dropped on the Dock icon; registers the `pdfsearch://` URL scheme).
 - `AppIcon.icns`: the icon.
 - `build.sh`: compiles into `/Applications/PDF Search.app` (or `~/Applications` if `/Applications` isn't writable). Quits a running copy first, then runs `PDFSearch --selftest` (exercises the BibTeX parser, key rule, writer and link encoding, and parses your real `library.bib`).
 - `Build PDF Search.command`: double-clickable wrapper. Checks for the developer tools, logs to `build.log`, opens the app.
@@ -128,8 +128,19 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    A collection is a "Search in" scope: `runSearchNow` searches everything and keeps hits whose entry
    key is in the collection; an empty query lists it in the note's order. `CollectionMenu` is the
    "Add to Collection" menu used in the toolbar, results context menu and `EntryCard`.
-8. **Settings**: `SettingsView` (⌘,) edits the `Paths` defaults.
-9. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+8. **Adding papers**: `EntryKind`, `Lookup` (DOI / arXiv / ISBN detection; `doi.org` content negotiation
+   for CSL-JSON, used for Crossref, DataCite/Zenodo and arXiv `10.48550/arXiv.<id>` DOIs; Crossref
+   `query.bibliographic` title search; Open Library `api/books?jscmd=data` then Google Books for ISBNs;
+   `scan()` reads the first pages for identifiers and a title), `AddPaperModel` (card state; its async
+   methods are `@MainActor`), `AddPaperView` (the sheet). `Library.requestAdd/nextAdd` queue cards,
+   `handleDropped` routes drops (folders → index; PDFs with an entry → index; new PDFs → cards, or a
+   choice when there are more than three), `addToLibrary` moves/copies to `Library/<key>.pdf`, appends to
+   library.bib, refreshes and opens the paper.
+9. **Paper summary**: "About this paper" (`SummaryBox`) is stored as a page-1 Text annotation whose
+   contents start with `Summary` (`Marginalia.isSummary/summary/summaryAnnotation`); excluded from the
+   highlight cards, indexed for search, and written as `## Summary` at the top of the note's managed block.
+10. **Settings**: `SettingsView` (⌘,) edits the `Paths` defaults.
+11. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 
@@ -167,15 +178,12 @@ PDFKit) need to agree, and stemming would match words that can't be marked.
 - Very common words can produce thousands of marks; capped at ~5000 per document.
 - Folder scopes are by path. If a folder is moved or renamed, remove it and add it again.
 - Highlighting has no undo (use Remove Highlight).
-- Adding a new paper or book with a DOI/ISBN lookup isn't built yet: for now, add entries to
-  `library.bib` by hand (or with any BibTeX tool) and name the PDF `<key>.pdf` in `Library/`.
+- Lookups need the internet; Crossref title matches can be the wrong paper, so the card always asks.
 - Margin notes are listed in page order, not pinned next to their passage on screen.
 
 ## Ideas for extending (and where to put them)
 
-- **Add a paper / book**: drop a PDF → find a DOI (regex `10\.\d{4,9}/\S+` on page 1) or arXiv id →
-  `https://doi.org/<doi>` with `Accept: application/x-bibtex` → confirm card → `CiteKey.make` →
-  rename to `Library/<key>.pdf` → `BibWriter.append`. Books: ISBN → Open Library / Google Books.
+- **Batch lookups**: run `Lookup` over all PDFs without details and offer one combined review list.
 - **Undo/redo for highlights**: register add/remove with the window's `NSUndoManager` in
   `Viewer.addHighlight` / `removeHighlight`.
 - **OCR for scans**: in `Library.extract`, if a page's text is empty, render the page
