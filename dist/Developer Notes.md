@@ -177,7 +177,11 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
 15. **#Tags**: `Marginalia.tags(in:)` / `hasTag` follow Obsidian's tag rules. Note cards show `TagChip`s (`FlowLayout`);
     a chip runs `Library.showTag` (My Notes, query `#tag`). `noteHits(…, tags:)` keeps only notes really carrying the tag
     (FTS drops the `#`). Obsidian indexes the same tags in the mirrored paper notes, with no extra files.
-16. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+16. **Obsidian vaults**: `ObsidianVaults.list()` reads Obsidian's `~/Library/Application Support/obsidian/obsidian.json`.
+    Settings ▸ Obsidian vault and the one-time first-launch offer (`Library.offerVaultIfNeeded`, only when no notes folder
+    is set and there's no `~/Obsidian Vault`) call `Library.useVault`: notes → `<vault>/Literature`,
+    library.bib → `<vault>/library.bib` (an existing one is copied in).
+17. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 

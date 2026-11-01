@@ -80,8 +80,33 @@ struct SettingsView: View {
     @State private var notes = Paths.notesFolder
     @AppStorage("writeNotes") private var writeNotes = true
 
+    private var vaults: [ObsidianVaults.Vault] { ObsidianVaults.list() }
+    /// the vault the notes folder is in, if any
+    private var currentVault: ObsidianVaults.Vault? {
+        vaults.first { notes == $0.path || notes.hasPrefix($0.path + "/") }
+    }
+
     var body: some View {
         Form {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Obsidian vault").frame(width: 110, alignment: .leading)
+                    Menu(currentVault?.name ?? "None") {
+                        ForEach(vaults) { v in
+                            Button(v.name + "   " + v.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")) {
+                                lib.useVault(v.path)
+                                notes = Paths.notesFolder; bib = Paths.libraryBib
+                            }
+                        }
+                        if vaults.isEmpty { Text("No Obsidian vaults found on this Mac") }
+                    }
+                    .fixedSize()
+                    Spacer()
+                }
+                Text("Choose your vault: paper notes go in its Literature folder, and library.bib in the vault. Or set the folders yourself below.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
             row("Papers folder", papers, help: "Searched automatically. New papers go in its Library folder.") { path in
                 set("papersFolder", path); papers = Paths.papers; lib.refresh()
             } reset: { set("papersFolder", nil); papers = Paths.papers; lib.refresh() }
@@ -196,6 +221,7 @@ struct ContentView: View {
             viewer.show(path: req.path, terms: [], page: req.page)
         }
         .onOpenURL { url in lib.handle([url]) }
+        .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { lib.offerVaultIfNeeded() } }
         .sheet(item: $lib.addRequest, onDismiss: { lib.nextAdd() }) { req in
             AddPaperView(file: req.file).environmentObject(lib)
         }
@@ -1520,6 +1546,30 @@ final class Viewer: ObservableObject {
 
 // MARK: - Library: the index and everything that talks to it
 
+/// The Obsidian vaults on this Mac, from Obsidian's own list (~/Library/Application Support/obsidian/obsidian.json).
+enum ObsidianVaults {
+    struct Vault: Identifiable, Hashable {
+        let path: String
+        let opened: Double
+        var name: String { (path as NSString).lastPathComponent }
+        var id: String { path }
+    }
+    static func list() -> [Vault] {
+        let file = NSHomeDirectory() + "/Library/Application Support/obsidian/obsidian.json"
+        guard let data = FileManager.default.contents(atPath: file),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let vaults = json["vaults"] as? [String: Any] else { return [] }
+        var out: [Vault] = []
+        for case let v as [String: Any] in vaults.values {
+            guard let p = v["path"] as? String else { continue }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue else { continue }
+            out.append(Vault(path: p, opened: (v["ts"] as? Double) ?? 0))
+        }
+        return out.sorted { $0.opened > $1.opened }   // most recently opened first
+    }
+}
+
 /// Where the library lives. Defaults work with or without Obsidian; change them in Settings (⌘,).
 enum Paths {
     static func setting(_ key: String) -> String? {
@@ -2220,6 +2270,49 @@ final class Library: ObservableObject {
         if let p = hit.note?.notePath { Marginalia.openNote(p) }
         else if !hit.path.isEmpty { openPaperNote(pdf: hit.path) }
         else if let e = hit.entry { openPaperNote(entry: e) }
+    }
+
+    /// Use an Obsidian vault: paper notes in <vault>/Literature, library.bib in the vault. An existing
+    /// library.bib elsewhere is copied in (the original is left where it was).
+    func useVault(_ vault: String) {
+        let d = UserDefaults.standard, fm = FileManager.default
+        d.set(vault + "/Literature", forKey: "notesFolder")
+        let current = Paths.libraryBib, target = vault + "/library.bib"
+        if current != target {
+            if !fm.fileExists(atPath: current) || fm.fileExists(atPath: target) {
+                d.set(target, forKey: "libraryBib")
+            } else if (try? fm.copyItem(atPath: current, toPath: target)) != nil {
+                d.set(target, forKey: "libraryBib")
+                showFlash("Copied library.bib into your vault")
+            }
+        }
+        d.set(true, forKey: "askedVault")
+        reloadBib(force: true)
+        syncOwnNotesSoon()
+        runSearchNow()
+    }
+
+    /// First launch: if you use Obsidian but your vault isn't ~/Obsidian Vault, offer to use it (once).
+    func offerVaultIfNeeded() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: "askedVault"), Paths.setting("notesFolder") == nil, Paths.vault == nil else { return }
+        let vaults = ObsidianVaults.list()
+        guard !vaults.isEmpty else { return }
+        d.set(true, forKey: "askedVault")
+        let alert = NSAlert()
+        alert.messageText = vaults.count == 1 ? "Use your Obsidian vault “\(vaults[0].name)”?" : "Use one of your Obsidian vaults?"
+        alert.informativeText = "PDF Search keeps a Markdown note for every paper you annotate (your highlights, notes and page links). In your vault they go in a Literature folder, and library.bib goes in the vault too.\n\nYou can change this any time in Settings (⌘,)."
+        var picker: NSPopUpButton?
+        if vaults.count > 1 {
+            let p = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 26), pullsDown: false)
+            p.addItems(withTitles: vaults.map { $0.name + "  (" + $0.path.replacingOccurrences(of: NSHomeDirectory(), with: "~") + ")" })
+            alert.accessoryView = p
+            picker = p
+        }
+        alert.addButton(withTitle: vaults.count == 1 ? "Use “\(vaults[0].name)”" : "Use This Vault")
+        alert.addButton(withTitle: "Not Now")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        useVault(vaults[picker?.indexOfSelectedItem ?? 0].path)
     }
 
     /// Every note tagged #tag (a tag chip on a note card).
@@ -3084,6 +3177,7 @@ enum SelfTest {
         let now = Date().timeIntervalSince1970
         print("SELFTEST recent labels: \(Library.when(now - 60)) | \(Library.when(now - 86_400)) | \(Library.when(now - 3 * 86_400)) | \(Library.when(now - 40 * 86_400)) | \(Library.when(now - 400 * 86_400))")
         print("SELFTEST tags: \(Marginalia.tags(in: "key idea #improvisation and #Ecology/sound, #improvisation again; not C# or page#3 or #1 or &#39;")) (expect [improvisation, Ecology/sound]) | has: \(Marginalia.hasTag("see #Ecology/sound here", "ecology")) \(Marginalia.hasTag("#improvisational", "improvisation")) (expect true false)")
+        print("SELFTEST obsidian vaults: \(ObsidianVaults.list().map { $0.name + " " + $0.path })")
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)

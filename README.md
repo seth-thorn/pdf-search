@@ -53,7 +53,12 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 
 **Portable.** File paths in `library.bib` and the notes are relative to the Papers folder, so the whole library can move to another Mac or an external drive.
 
-**Obsidian is optional.** If you have a folder called `Obsidian Vault` in your home folder, `library.bib` and the paper notes (`Literature/`) go there. Otherwise they go in `~/Papers` (`library.bib`, `Notes/`). You can open them with any text editor or notes app, and change all of this in **Settings (⌘,)**.
+### Using it with Obsidian (optional)
+
+- **First launch:** if you use Obsidian, PDF Search offers to use your vault. Say yes, and it keeps a note for every paper you annotate in `<your vault>/Literature/@key.md` and puts `library.bib` in the vault. Later: **Settings (⌘,) ▸ Obsidian vault**.
+- **In each paper note:** your highlights (Essential first), your notes, `[@key, p. 12]` citations, and **p. 12** links that open the PDF at that page in PDF Search. Write your own thoughts under `## Notes`; PDF Search never touches them.
+- **Linking and tags:** **Open in Obsidian** (⌥⌘O) jumps to a paper's note. **Copy Citation ▸ [[@key]]** links a paper from any note (e.g. a project note). **#tags** in your highlight notes show up in Obsidian's Tags panel.
+- **No Obsidian?** Everything still works: notes go to `~/Papers/Notes` and `library.bib` to `~/Papers`, as plain Markdown and BibTeX for any app.
 
 It's one Swift file (SwiftUI + PDFKit + SQLite full-text search) with no dependencies. Requires macOS 13 or later.
 
