@@ -48,7 +48,7 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 - **Projects live in your notes app.** For each thing you're writing, keep a note with `[[@key]]` links to its papers; in Obsidian, backlinks show which projects a paper belongs to.
 - **Search your own notes.** **Search in ▸ My Notes** (⇧⌘F) searches only what you've written: highlighted passages, your notes on them, paper summaries, and your own writing in the paper notes. Each note is a result; click one to jump to it in the PDF, or right-click → *Copy Quote with Citation* for `“…” [@key, p. 12]`. Ordinary searches also show any of your notes that match.
 - **Pick up where you left off.** **Search in ▸ Recently Edited** (⇧⌘E) lists the papers you've highlighted or written notes in, newest first.
-- **Simple toolbar.** Just **Copy Citation**, **Open in Obsidian**, **Notes**, **•••** and **Workflow** (a one-screen reminder of how it all fits together), plus ‹ › while searching. Drag the dividers to resize the results and notes columns.
+- **Simple toolbar.** Just **Copy Citation**, **Open in Obsidian**, **Notes** and **•••**, plus ‹ › while searching. A **README** link under the results (or Help ▸ PDF Search README, ⌘?) explains the workflow on one page. Drag the dividers to resize the results and notes columns.
 - **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote (Essential passages first), a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
 
 **Portable.** File paths in `library.bib` and the notes are relative to the Papers folder, so the whole library can move to another Mac or an external drive.

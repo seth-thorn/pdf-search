@@ -40,6 +40,10 @@ struct PDFSearchApp: App {
                 Button("Write Notes for All Annotated PDFs") { lib.exportAllMarginalia() }
                 Button("Clear Index…") { lib.confirmClear() }
             }
+            CommandGroup(replacing: .help) {
+                Button("PDF Search README") { lib.readmeRequest += 1 }
+                    .keyboardShortcut("?", modifiers: .command)
+            }
             CommandGroup(before: .toolbar) {
                 Button("Zoom to Fit") { lib.zoomRequest += 1 }
                     .keyboardShortcut("0", modifiers: .command)
@@ -139,6 +143,7 @@ struct ContentView: View {
     @State private var showFind = false
     @AppStorage("showMargin") private var showMargin = true
     @AppStorage("marginWidth") private var marginWidth: Double = 290
+    @State private var showReadme = false
     /// a library entry with no PDF (e.g. a book), shown as a card instead of a PDF
     @State private var entryOnly: BibEntry?
     @State private var findText = ""
@@ -196,6 +201,8 @@ struct ContentView: View {
         .onChange(of: lib.citeTexRequest) { _ in cite(.latex) }
         .onChange(of: lib.zoomRequest) { _ in viewer.zoomToFit() }
         .onChange(of: lib.openNoteRequest) { _ in openPaperNote() }
+        .onChange(of: lib.readmeRequest) { _ in showReadme = true }
+        .sheet(isPresented: $showReadme) { ReadmeCard() }
         .task(id: findText) {
             guard showFind else { return }
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -373,6 +380,10 @@ struct ContentView: View {
                 Text("\(lib.results.count) matches")
             }
             Spacer()
+            Button("README") { showReadme = true }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help("How PDF Search is meant to be used, in one page (also Help ▸ PDF Search README, ⌘?)")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -506,7 +517,6 @@ struct ContentView: View {
                     }
                         .disabled(viewer.path == nil && entryOnly == nil)
                         .help("More: zoom to fit, open in Preview, show in Finder")
-                    WorkflowButton()
                 }
             }
     }
@@ -670,41 +680,50 @@ struct HitRow: View {
     }
 }
 
-/// The "Workflow" toolbar button: a pocket reminder of how the whole thing is meant to be used.
-struct WorkflowButton: View {
-    @State private var show = false
-    var body: some View {
-        Button { show.toggle() } label: { Text("Workflow") }
-            .help("A one-screen reminder of the workflow")
-            .popover(isPresented: $show, arrowEdge: .bottom) { WorkflowCard() }
-    }
-}
-
-struct WorkflowCard: View {
-    private let rows: [(String, String)] = [
-        ("ADD",   "drop a PDF on the window → check the card → Add"),
-        ("FIND",  "type · Search in: everything, a folder, My Notes ⇧⌘F, Recently Edited ⇧⌘E"),
-        ("READ",  "click a result · ⌘G next match · ⌘F find in this PDF"),
-        ("MARK",  "select text → H → type your note · ☐ Essential = a key passage"),
-        ("KEEP",  "notes live in the PDF · copied to Obsidian automatically (Literature/@key)"),
-        ("THINK", "Open in Obsidian ⌥⌘O · write under ## Notes · link papers with [[@key]]"),
-        ("CITE",  "Copy Citation → [@key] Obsidian/Pandoc · \\cite{key} LaTeX"),
+/// README: how the app is meant to be used, in plain English, on one page (Help ▸ PDF Search README, ⌘?,
+/// or the README link under the results).
+struct ReadmeCard: View {
+    @Environment(\.dismiss) private var dismiss
+    private let steps: [(String, String)] = [
+        ("Add a paper",
+         "Drag a PDF onto the window. Check the citation details on the card, then click Add to Library. The PDF is filed in your Papers folder."),
+        ("Find",
+         "Type in the search box. Use “Search in” to narrow it: a folder, My Notes (only what you’ve written), or Recently Edited (papers you’ve worked on)."),
+        ("Read",
+         "Click a result. Your search words are marked in orange; ⌘G jumps to the next one."),
+        ("Highlight",
+         "Select a passage and press H, then type your thought in the box on the right. Tick Essential for the few passages that matter most."),
+        ("Your notes stay with the PDF",
+         "Highlights and notes are saved inside the PDF itself, and copied automatically into the paper’s note in Obsidian."),
+        ("Think and write in Obsidian",
+         "Click Open in Obsidian to go to the paper’s note and write your own thoughts under “Notes”. For a project, make a note and paste links to its papers (Copy Citation ▸ [[@key]])."),
+        ("Cite",
+         "Copy Citation gives you [@key] for Obsidian and Pandoc, or \\cite{key} for LaTeX and Overleaf."),
     ]
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Workflow").font(.headline)
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 7) {
-                ForEach(rows.indices, id: \.self) { i in
-                    GridRow {
-                        Text(rows[i].0).font(.caption.monospaced().weight(.bold)).foregroundStyle(.secondary)
-                        Text(rows[i].1).font(.callout).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 14) {
+            Text("How PDF Search works").font(.title2.weight(.semibold))
+            VStack(alignment: .leading, spacing: 11) {
+                ForEach(steps.indices, id: \.self) { i in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text("\(i + 1)").font(.callout.monospacedDigit().weight(.semibold)).foregroundStyle(.secondary)
+                            .frame(width: 14, alignment: .trailing)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(steps[i].0).font(.headline)
+                            Text(steps[i].1).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
-            Text("Full manual: PDF Search Manual in your vault").font(.caption).foregroundStyle(.tertiary)
+            HStack {
+                Text("The full manual is “PDF Search Manual” in your Obsidian vault.").font(.caption).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 4)
         }
-        .padding(16)
-        .frame(width: 470)
+        .padding(22)
+        .frame(width: 520)
     }
 }
 
@@ -1602,6 +1621,8 @@ final class Library: ObservableObject {
     /// bumped by View ▸ Zoom to Fit (⌘0) and File ▸ Open Paper Note (⌥⌘O)
     @Published var zoomRequest = 0
     @Published var openNoteRequest = 0
+    /// bumped by Help ▸ PDF Search README
+    @Published var readmeRequest = 0
     /// a pdfsearch://open?file=…&page=… link to show (from an Obsidian note)
     @Published private(set) var linkRequest: LinkRequest?
     private var lastLinkTime = Date.distantPast

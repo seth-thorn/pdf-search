@@ -64,7 +64,8 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
      "file moved"), plus a toolbar with: ‹ match counter › (only while there are matches), Copy Citation (a plain
      menu: `[@key]`, `[[@key]]` via `CiteStyle.obsidianLink`, `\cite{key}`, key), Open in Obsidian (`openPaperNote`;
      `ensurePaperNote` creates the note if needed), Notes (column toggle), ••• (Zoom to Fit, Open in Preview,
-     Show in Finder) and Workflow (`WorkflowButton` / `WorkflowCard`, a shorthand popover). The notes column is resized with `ColumnHandle`
+     Show in Finder). A README link in the status bar (and Help ▸ PDF Search README, ⌘?) opens `ReadmeCard`, a plain-English
+     one-page workflow, as a sheet. The notes column is resized with `ColumnHandle`
      (width in `@AppStorage("marginWidth")`); the PDF pane has 6 pt leading padding so PDFView doesn't fight the
      sidebar divider's resize cursor.
    - Find state: `showFind`, `findText`, `findFocused`. `activeTerms` = find text when the bar has
