@@ -715,7 +715,7 @@ struct ReadmeCard: View {
         ("Add a paper",
          "Drag a PDF onto the window. Check the citation details on the card, then click Add to Library. The PDF is filed in your Papers folder."),
         ("Find",
-         "Type in the search box. Use “Search in” to narrow it: a folder, My Notes (only what you’ve written), or Recently Edited (papers you’ve worked on)."),
+         "Type a word or an exact phrase (capitals don’t matter). To find separate words anywhere on a page, put commas between them. Use “Search in” to narrow it: a folder, My Notes (only what you’ve written), or Recently Edited (papers you’ve worked on)."),
         ("Read",
          "Click a result. Your search words are marked in orange; ⌘G jumps to the next one."),
         ("Highlight",
@@ -2587,8 +2587,10 @@ final class Library: ObservableObject {
         }
     }
 
-    /// Plain words become prefix matches ("glitch" finds "glitches"); "quoted phrases" match exactly.
-    /// All of them must appear on the same page.
+    /// What you type is searched as one exact phrase (capitals and accents ignored); the last word may be
+    /// unfinished ("accessible instrument des" finds "accessible instrument design"). Commas separate phrases
+    /// that must all be on the same page, in any order ("accessible, design"). #tags and "quoted phrases"
+    /// (matched exactly, no unfinished last word) are terms of their own.
     static func parse(_ q: String) -> (fts: String, terms: [String]) {
         var parts: [String] = []
         var terms: [String] = []
@@ -2596,14 +2598,29 @@ final class Library: ObservableObject {
         let re = try! NSRegularExpression(pattern: "\"([^\"]*)\"")
         let full = NSRange(location: 0, length: ns.length)
         for m in re.matches(in: q, range: full) {
-            let phrase = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces)
+            let phrase = ns.substring(with: m.range(at: 1))
+                .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             if hasWordChars(phrase) { parts.append("\"\(phrase)\""); terms.append(phrase) }
         }
-        let rest = re.stringByReplacingMatches(in: q, range: full, withTemplate: " ")
+        let rest = re.stringByReplacingMatches(in: q, range: full, withTemplate: " , ")
             .replacingOccurrences(of: "\"", with: " ")
-        for w in rest.split(whereSeparator: { $0.isWhitespace }) {
-            let word = String(w)
-            if hasWordChars(word) { parts.append("\"\(word)\"*"); terms.append(word) }
+        for group in rest.split(whereSeparator: { $0 == "," || $0 == ";" }) {
+            var words: [String] = []
+            for w in group.split(whereSeparator: { $0.isWhitespace }) {
+                let word = String(w)
+                guard hasWordChars(word) else { continue }
+                if word.hasPrefix("#") {
+                    // a #tag is its own term (My Notes keeps only notes really tagged with it)
+                    let tag = String(word.drop(while: { $0 == "#" }))
+                    if hasWordChars(tag) { parts.append("\"\(tag)\""); terms.append(tag) }
+                } else {
+                    words.append(word)
+                }
+            }
+            guard !words.isEmpty else { continue }
+            let phrase = words.joined(separator: " ")
+            parts.append("\"\(phrase)\"*")       // FTS5: the * applies to the phrase's last word
+            terms.append(phrase)
         }
         return (parts.joined(separator: " "), terms)
     }
@@ -3178,6 +3195,7 @@ enum SelfTest {
         print("SELFTEST recent labels: \(Library.when(now - 60)) | \(Library.when(now - 86_400)) | \(Library.when(now - 3 * 86_400)) | \(Library.when(now - 40 * 86_400)) | \(Library.when(now - 400 * 86_400))")
         print("SELFTEST tags: \(Marginalia.tags(in: "key idea #improvisation and #Ecology/sound, #improvisation again; not C# or page#3 or #1 or &#39;")) (expect [improvisation, Ecology/sound]) | has: \(Marginalia.hasTag("see #Ecology/sound here", "ecology")) \(Marginalia.hasTag("#improvisational", "improvisation")) (expect true false)")
         print("SELFTEST obsidian vaults: \(ObsidianVaults.list().map { $0.name + " " + $0.path })")
+        print("SELFTEST phrase search: \(Library.parse("Accessible instrument des").fts) | \(Library.parse("accessible, design").fts) | \(Library.parse("#improvisation listening body").fts) | terms \(Library.parse("accessible instrument design").terms)")
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)

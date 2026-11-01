@@ -108,8 +108,10 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
      transaction under a lock, and publishes progress (and refreshes results every 100 files).
    - `runSearchNow()` calls `parse(query)` then `reader.search(fts, scope:)` or
      `reader.allFiles(scope:)`, plus `count(scope:)`. A generation counter (`searchGen`) drops stale results.
-   - `parse(q)`: each word → `"word"*`, each quoted phrase → `"phrase"`, joined with spaces
-     (= AND). It also returns the plain terms used for marking hits in the PDF.
+   - `parse(q)`: the words between commas (or semicolons) become one phrase, `"w1 w2 w3"*` (exact
+     phrase, last word may be unfinished); each comma-separated group and each `#tag` or `"quoted phrase"`
+     (exact, no prefix) is a separate term, joined with spaces (= AND, same page). It also returns the
+     plain terms used for marking hits in the PDF.
    - `renameFolder`, `removeFolder`, `remove` (exclude files), `confirmClear`, `choose` (open panel).
 5. **Bibliography**: `BibEntry`, `BibIndex` (lookup by PDF path or by file name = key), `BibParser`
    (byte-level BibTeX parser with light LaTeX decoding), `CiteKey` (the key rule; mirrored in
