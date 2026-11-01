@@ -44,6 +44,9 @@ A universal (Apple Silicon + Intel) build compiles once per `-target` (`arm64-�
 | Settings | user defaults `local.pdfsearch`: `papersFolder`, `libraryBib`, `notesFolder`, `collectionsFolder`, `writeNotes`, `scope`, `highlightColor`, `showMargin` |
 
 All paths are in `enum Paths` and editable in Settings (⌘,). Indexing never modifies PDFs.
+`file = {…}` fields in `library.bib`, the `pdf:` line of paper notes and `pdfsearch://` links store paths
+**relative to the Papers folder** (`Library/x.pdf`, via `Paths.relative` / `Paths.absolute`), so a library
+can move (another Mac, a USB stick). Absolute paths and JabRef's `:path:PDF` are still read.
 Highlights and margin notes are written into the PDF being viewed.
 
 ## How it works (architecture)
@@ -140,7 +143,21 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    contents start with `Summary` (`Marginalia.isSummary/summary/summaryAnnotation`); excluded from the
    highlight cards, indexed for search, and written as `## Summary` at the top of the note's managed block.
 10. **Settings**: `SettingsView` (⌘,) edits the `Paths` defaults.
-11. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+11. **My Notes** (Search in ▸ My Notes, ⇧⌘F): searches only the user's own material.
+    `Library.extract` returns each PDF's highlights/notes and summary as `IndexedNote`s, stored by
+    `DB.store` in the `notes` table. `OwnNotes.parse` takes the user's writing in a paper note
+    (everything after the managed block, or the whole body if there is none; one row per paragraph;
+    lone headings skipped). `Library.syncOwnNotes()` re-reads changed `.md` files after a rescan, when the
+    app comes to the front and when the notes folder changes (and does nothing if the folder is missing).
+    The scope is the sentinel `Library.myNotesScope`: an empty query lists annotated papers
+    (`notedPapers`), a query gives one `Hit` per note (`noteHits`, `Hit.note: NoteInfo`). Normal searches run
+    `attachNotes`, which sets `Hit.noteSnippet` and `noteCount` and appends papers matching only in notes.
+    Selecting a note calls `Viewer.show(..., note: NoteTarget)`, which goes to the annotation and sets
+    `spotlightNoteID` (outlines and scrolls to the card without taking keyboard focus, unlike
+    `focusNoteID`). Right-click: *Copy Quote with Citation* (`“…” [@key, p. N]`), *Open Paper Note*
+    (`Marginalia.openNote`: `obsidian://open?path=` when the file is inside a folder containing
+    `.obsidian`, else the default app).
+12. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 
@@ -151,7 +168,16 @@ files(id INTEGER PRIMARY KEY, path TEXT UNIQUE, mtime REAL, size INTEGER,
 folders(path TEXT PRIMARY KEY, name TEXT)   -- added folders; name = optional display name
 excluded(path TEXT PRIMARY KEY)             -- files removed by hand; skipped on rescans
 fts USING fts5(body, tokenize='unicode61 remove_diacritics 2')
+notes USING fts5(quote, comment, kind UNINDEXED, page UNINDEXED, label UNINDEXED,
+                 tokenize='unicode61 remove_diacritics 2')
+      -- kind: h = highlight/note, s = "About this paper", o = a paragraph of a paper note (.md)
+notefiles(id INTEGER PRIMARY KEY, path TEXT UNIQUE, mtime REAL, pdf TEXT, key TEXT)
+      -- paper notes whose own text is indexed; pdf = the note's `pdf:` line as written
 ```
+
+`notes` rowids: `fileID * 10000 + n` for a PDF's annotations (deleted with the file, as a range),
+`-(notefileID * 10000 + n)` for paper-note paragraphs. `PRAGMA user_version` is the index version:
+on upgrading to 2, `setup()` zeroes every `files.mtime` so the next rescan re-reads all PDFs and fills `notes`.
 
 **Key trick:** FTS rows have `rowid = fileID * 100000 + page` (page 0 = the file name,
 pages 1…n = text). The file and page come from the rowid, and deleting a file's text is a fast

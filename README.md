@@ -10,7 +10,10 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 - **Write in the margins.** Select a passage and press **H**. It's highlighted, and a note box opens in the notes column beside the PDF. Every highlight has a note box, which saves as you type. Each highlight has a clear Remove button. An **About this paper** box holds notes on the whole paper. Notes are saved *inside the PDF* as standard comments, so Preview, Acrobat and other apps see them too, and they're searchable.
 - **Cite.** PDFs are matched to entries in a plain `library.bib`, so results show real titles and authors. ⇧⌘C copies `[@cascone2000aesthetics]` (Markdown/Pandoc), and ⌥⇧⌘C copies `\cite{cascone2000aesthetics}` (LaTeX/Overleaf). Books you don't have as PDFs live in the same bibliography.
 - **Collections.** A reading list for each thing you're writing, kept as a plain Markdown note (`- [[@key]] Author (Year) Title`). Add papers with one click, browse a collection like a folder, and turn it into a `.bib` file for Overleaf or Pandoc.
+- **Search your own notes.** **Search in ▸ My Notes** (⇧⌘F) searches only what you've written: highlighted passages, your notes on them, paper summaries, and your own writing in the paper notes. Each note is a result; click one to jump to it in the PDF, or right-click → *Copy Quote with Citation* for `“…” [@key, p. 12]`. Ordinary searches also show any of your notes that match.
 - **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote, a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
+
+**Portable.** File paths in `library.bib` and the notes are relative to the Papers folder, so the whole library can move to another Mac or an external drive.
 
 **Obsidian is optional.** If you have a folder called `Obsidian Vault` in your home folder, `library.bib`, the paper notes (`Literature/`) and collections (`Collections/`) go there. Otherwise they go in `~/Papers` (`library.bib`, `Notes/`, `Collections/`). You can open them with any text editor or notes app, and change all of this in **Settings (⌘,)**.
 
@@ -54,6 +57,7 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 |---|---|
 | type in the search box | search everything (or the folder chosen in "Search in") |
 | ⌘F | find inside the open PDF |
+| ⇧⌘F | search only your notes (My Notes) |
 | ⌘G / ⇧⌘G | next / previous match |
 | H | highlight the selected text (a note box opens beside it), also ⌃⌘H |
 | ⇧⌘C / ⌥⇧⌘C | copy `[@key]` / `\cite{key}` for the open paper |
