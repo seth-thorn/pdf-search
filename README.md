@@ -31,7 +31,7 @@ You need a Mac (macOS 13 or newer). No GitHub account needed.
 - Type in the search box. Click a result to read it.
 - Select text and press **H** to highlight it and write a note.
 
-That's it. Everything else is below. ⬇️
+That's it. 🎉 **See what it does: the [visual quick start](GUIDE.md).** Everything else is below. ⬇️
 
 ---
 
