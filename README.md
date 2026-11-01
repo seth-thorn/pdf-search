@@ -1,5 +1,40 @@
 # PDF Search
 
+## TL;DR: get it running in 5 minutes
+
+You need a Mac (macOS 13 or newer). No GitHub account needed.
+
+**1. Install Apple's free tools** (one time only)
+- Open **Terminal** (press ⌘ Space, type `Terminal`, press Return).
+- Paste this and press Return:
+  ```
+  xcode-select --install
+  ```
+- Click **Install** in the window that pops up. Wait until it's done (a few minutes).
+  *If it says "already installed", that's fine. Go on.*
+
+**2. Download PDF Search**
+- On this page, click the green **Code** button → **Download ZIP**.
+- Open your **Downloads** folder and double-click the ZIP to unzip it.
+  *If you see a folder called `pdf-search-main` already, Safari unzipped it for you. Go on.*
+
+**3. Build it**
+- In Terminal, paste this and press Return:
+  ```
+  cd ~/Downloads/pdf-search-main && bash build.sh
+  ```
+- Wait for **Built: /Applications/PDF Search.app**.
+
+**4. Use it**
+- Open **PDF Search** from your Applications folder.
+- Drag a folder of PDFs onto the window. Wait for indexing to finish.
+- Type in the search box. Click a result to read it.
+- Select text and press **H** to highlight it and write a note.
+
+That's it. Everything else is below. ⬇️
+
+---
+
 A small, native Mac app for reading and citing research PDFs: full-text search across all of them, notes in the margins, and a plain BibTeX bibliography. A lightweight alternative to DEVONthink and Zotero for people who want one simple tool.
 
 <img src="dist/icon.png" width="96" align="right" alt="">
