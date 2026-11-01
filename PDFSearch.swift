@@ -43,6 +43,8 @@ struct PDFSearchApp: App {
                     .keyboardShortcut("f")
                 Button("Search My Notes") { lib.scope = Library.myNotesScope }
                     .keyboardShortcut("f", modifiers: [.command, .shift])
+                Button("Show Recently Edited") { lib.scope = Library.recentScope }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button("Highlight Selection (or press H)") { lib.noteRequest += 1 }
                     .keyboardShortcut("h", modifiers: [.command, .control])
                 Divider()
@@ -199,6 +201,7 @@ struct ContentView: View {
     // Sidebar: results list + status line
     var searchPrompt: String {
         if inMyNotes { return "Search your notes" }
+        if inRecent { return "Search recently edited papers" }
         if let c = scopeCollection { return "Search \(c.name)" }
         if let s = lib.scope, let f = lib.folders.first(where: { $0.path == s }) { return "Search \(f.name)" }
         return "Search everything"
@@ -206,6 +209,7 @@ struct ContentView: View {
     var scopeFolder: Folder? { lib.scope.flatMap { s in lib.folders.first { $0.path == s } } }
     var scopeCollection: Collection? { lib.scope.flatMap { s in lib.collections.first { $0.path == s } } }
     var inMyNotes: Bool { lib.scope == Library.myNotesScope }
+    var inRecent: Bool { lib.scope == Library.recentScope }
 
     /// the entry behind the first selected result
     func entryFor(_ ids: Set<Int>) -> BibEntry? {
@@ -218,6 +222,7 @@ struct ContentView: View {
             Picker("Search in", selection: $lib.scope) {
                 Text("Everything (\(lib.docCount))").tag(String?.none)
                 Label("My Notes", systemImage: "highlighter").tag(Optional(Library.myNotesScope))
+                Label("Recently Edited", systemImage: "clock").tag(Optional(Library.recentScope))
                 Divider()
                 ForEach(lib.folders) { f in
                     Text(verbatim: String(repeating: "\u{2003}", count: f.depth) + "\(f.name)  (\(f.count))")
@@ -257,7 +262,7 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .disabled(lib.scope == nil)
+            .disabled(lib.scope == nil || inRecent)
             .help("Folder, collection or notes options")
         }
         .padding(.horizontal, 10)
@@ -312,6 +317,9 @@ struct ContentView: View {
                 .overlay {
                     if lib.results.isEmpty && !lib.query.trimmingCharacters(in: .whitespaces).isEmpty {
                         Text(inMyNotes ? "No notes match" : "No matches").foregroundStyle(.secondary)
+                    } else if lib.results.isEmpty && inRecent {
+                        Text("Nothing yet.\nPapers you highlight or write notes in\nappear here, newest first.")
+                            .multilineTextAlignment(.center).foregroundStyle(.secondary)
                     } else if lib.results.isEmpty && inMyNotes {
                         Text("No notes yet.\nSelect text in a PDF and press H.")
                             .multilineTextAlignment(.center).foregroundStyle(.secondary)
@@ -362,6 +370,8 @@ struct ContentView: View {
                 Text("Indexing \(p.done) of \(p.total)…")
             } else if let err = lib.errorMessage {
                 Text(err).foregroundStyle(.red)
+            } else if inRecent {
+                Text(lib.results.count == 1 ? "1 paper you've worked on" : "\(lib.results.count) papers you've worked on")
             } else if inMyNotes {
                 if lib.query.trimmingCharacters(in: .whitespaces).isEmpty {
                     Text(lib.results.count == 1 ? "1 paper with notes" : "\(lib.results.count) papers with notes")
@@ -1536,6 +1546,8 @@ final class Library: ObservableObject {
     static let shared = Library()
     /// the "Search in ▸ My Notes" choice (not a folder path)
     static let myNotesScope = "\u{1}mynotes"
+    /// the "Search in ▸ Recently Edited" choice: papers you've highlighted or written notes in, newest first
+    static let recentScope = "\u{1}recent"
 
     @Published var query = "" { didSet { if query != oldValue { scheduleSearch() } } }
     @Published private(set) var results: [Hit] = []
@@ -1830,7 +1842,11 @@ final class Library: ObservableObject {
 
     /// Called after the open PDF was saved with new/changed highlights or notes.
     func afterSave(path: String, notes: [MarginNote], summary: String) {
-        writeQ.async { self.index([URL(fileURLWithPath: path)]) }   // so new notes are searchable
+        let now = Date().timeIntervalSince1970
+        writeQ.async {
+            self.writer.markEdited(path, at: now)              // for Recently Edited (also counts removals)
+            self.index([URL(fileURLWithPath: path)])           // so new notes are searchable
+        }
         var entry = bib.entry(forPath: path)
         if let e = entry, !e.inLibrary, !notes.isEmpty || !summary.isEmpty { entry = ensureInLibrary(e)?.entry ?? e }
         Marginalia.mirror(pdfPath: path, entry: entry, notes: notes, summary: summary)
@@ -2176,7 +2192,8 @@ final class Library: ObservableObject {
             ops.addOperation {
                 let ex = autoreleasepool { Library.extract(URL(fileURLWithPath: item.path)) }
                 lock.lock()
-                self.writer.store(path: item.path, mtime: item.mtime, size: item.size, pages: ex?.pages, notes: ex?.notes ?? [])
+                self.writer.store(path: item.path, mtime: item.mtime, size: item.size, pages: ex?.pages, notes: ex?.notes ?? [],
+                                  edited: ex?.edited)
                 done += 1
                 let d = done
                 lock.unlock()
@@ -2203,7 +2220,7 @@ final class Library: ObservableObject {
             self.docCount = n
             self.folders = f
             self.indexedPaths = paths
-            if let s = self.scope, s != Library.myNotesScope, !f.contains(where: { $0.path == s }),
+            if let s = self.scope, s != Library.myNotesScope, s != Library.recentScope, !f.contains(where: { $0.path == s }),
                !self.collections.contains(where: { $0.path == s }) { self.scope = nil }
         }
     }
@@ -2252,17 +2269,21 @@ final class Library: ObservableObject {
     }
 
     /// Text of every page, plus your highlights and notes (for My Notes), or nil if the PDF can't be opened.
-    static func extract(_ url: URL) -> (pages: [String], notes: [IndexedNote])? {
+    static func extract(_ url: URL) -> (pages: [String], notes: [IndexedNote], edited: Double?)? {
         guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
         var pages: [String] = []
         pages.reserveCapacity(doc.pageCount)
         var annotated = false
+        var edited: Double?      // newest highlight/note date (set by PDF Search when you change one)
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { pages.append(""); continue }
             var text = page.string ?? ""
             // your margin notes are part of the page, so searching finds them
             let marks = page.annotations.filter(Marginalia.isMarkup)
             if !marks.isEmpty { annotated = true }
+            for m in marks {
+                if let d = m.modificationDate?.timeIntervalSince1970, d > (edited ?? 0), d < Date().timeIntervalSince1970 + 86_400 { edited = d }
+            }
             let notes = marks.compactMap { $0.contents }.filter { !$0.isEmpty }
             if !notes.isEmpty { text += "\n" + notes.joined(separator: "\n") }
             pages.append(text)
@@ -2276,7 +2297,7 @@ final class Library: ObservableObject {
                                          quote: n.quote, comment: n.comment))
             }
         }
-        return (pages, notes)
+        return (pages, notes, edited)
     }
 
     // MARK: searching
@@ -2294,13 +2315,40 @@ final class Library: ObservableObject {
         let g = searchGen
         let q = query
         let myNotes = self.scope == Library.myNotesScope
+        let recent = self.scope == Library.recentScope
         let coll = collections.first { $0.path == self.scope }
-        let scope = (coll == nil && !myNotes) ? self.scope : nil   // a collection searches everything, then filters
+        let scope = (coll == nil && !myNotes && !recent) ? self.scope : nil   // a collection searches everything, then filters
         let bib = self.bib
         let indexed = self.indexedPaths
         readQ.async {
             let (fts, terms) = Library.parse(q)
             let empty = q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if recent {
+                // papers you've worked on, newest first; typing searches just those
+                let rec = self.reader.recentFiles()
+                var hits: [Hit]
+                if empty {
+                    hits = rec.map { Hit(id: $0.id, path: $0.path, page: 0, badge: Library.when($0.time), snippet: nil) }
+                } else if fts.isEmpty {
+                    hits = []
+                } else {
+                    let times = Dictionary(rec.map { ($0.id, $0.time) }, uniquingKeysWith: { a, b in max(a, b) })
+                    hits = self.reader.search(fts, scope: nil)
+                        .compactMap { h -> Hit? in
+                            guard let t = times[h.id] else { return nil }
+                            return Hit(id: h.id, path: h.path, page: h.page, badge: Library.when(t), snippet: h.snippet)
+                        }
+                        .sorted { (times[$0.id] ?? 0) > (times[$1.id] ?? 0) }
+                }
+                for i in hits.indices { hits[i].entry = bib.entry(forPath: hits[i].path) }
+                DispatchQueue.main.async {
+                    guard g == self.searchGen else { return }
+                    self.results = hits
+                    self.scopedCount = hits.count
+                    if self.terms != terms { self.terms = terms }
+                }
+                return
+            }
             if myNotes {
                 let hits = empty ? self.notedPapers(bib: bib, indexed: indexed)
                                  : (fts.isEmpty ? [] : self.noteHits(fts, bib: bib, indexed: indexed))
@@ -2391,6 +2439,25 @@ final class Library: ObservableObject {
 
     private static func hasWordChars(_ s: String) -> Bool {
         s.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
+    }
+
+    /// "today 2:14 pm", "yesterday", "Tuesday", "Oct 28", "Oct 28, 2025"
+    static func when(_ t: Double) -> String {
+        let d = Date(timeIntervalSince1970: t)
+        let cal = Calendar.current
+        let f = DateFormatter()
+        f.locale = Locale.current
+        if cal.isDateInToday(d) {
+            f.dateFormat = "h:mm a"
+            return "today " + f.string(from: d).lowercased()
+        }
+        if cal.isDateInYesterday(d) { return "yesterday" }
+        if let days = cal.dateComponents([.day], from: d, to: Date()).day, days < 6 {
+            f.dateFormat = "EEEE"
+            return f.string(from: d)
+        }
+        f.dateFormat = cal.isDate(d, equalTo: Date(), toGranularity: .year) ? "MMM d" : "MMM d, yyyy"
+        return f.string(from: d)
     }
 
     // MARK: My Notes (runs on readQ)
@@ -2923,6 +2990,8 @@ enum SelfTest {
             let d = Thumbnails.render(pdf.appendingPathComponent(first).path)
             print("SELFTEST thumbnail of \(first): \(d.map { "\($0.count) bytes, " + (NSImage(data: $0).map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? "unreadable") } ?? "FAILED")")
         }
+        let now = Date().timeIntervalSince1970
+        print("SELFTEST recent labels: \(Library.when(now - 60)) | \(Library.when(now - 86_400)) | \(Library.when(now - 3 * 86_400)) | \(Library.when(now - 40 * 86_400)) | \(Library.when(now - 400 * 86_400))")
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)
@@ -3958,6 +4027,9 @@ final class DB {
                                                  mtime REAL, pdf TEXT, key TEXT);
             """)
         exec("ALTER TABLE folders ADD COLUMN name TEXT")  // older indexes; harmless if it already exists
+        // Recently Edited: newest highlight/note date found in the PDF, and the time of each save made here
+        exec("ALTER TABLE files ADD COLUMN edited REAL")
+        exec("CREATE TABLE IF NOT EXISTS edits(path TEXT PRIMARY KEY, time REAL)")
         // Index version 2 adds My Notes: read every PDF once more so its highlights and notes are indexed too.
         var version = 0
         if let st = prepare("PRAGMA user_version"), st.step() { version = st.int(0) }
@@ -4054,14 +4126,14 @@ final class DB {
 
     // writing
 
-    func store(path: String, mtime: Double, size: Int, pages: [String]?, notes: [IndexedNote] = []) {
+    func store(path: String, mtime: Double, size: Int, pages: [String]?, notes: [IndexedNote] = [], edited: Double? = nil) {
         exec("BEGIN")
         if let old = prepare("SELECT id FROM files WHERE path=?", [path]), old.step() {
             removeFile(id: old.int(0))
         }
         let chars = pages?.reduce(0) { $0 + $1.utf16.count } ?? 0
-        run("INSERT INTO files(path, mtime, size, npages, chars) VALUES (?,?,?,?,?)",
-            [path, mtime, size, pages?.count ?? -1, chars])
+        run("INSERT INTO files(path, mtime, size, npages, chars, edited) VALUES (?,?,?,?,?,?)",
+            [path, mtime, size, pages?.count ?? -1, chars, edited])
         let id = Int(sqlite3_last_insert_rowid(db))
         if let ins = prepare("INSERT INTO fts(rowid, body) VALUES (?,?)") {
             let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
@@ -4139,7 +4211,7 @@ final class DB {
     func addFolder(_ path: String) { run("INSERT OR IGNORE INTO folders(path) VALUES (?)", [path]) }
 
     func clear() {
-        exec("DELETE FROM fts; DELETE FROM notes; DELETE FROM notefiles; DELETE FROM files; DELETE FROM folders; DELETE FROM excluded; VACUUM;")
+        exec("DELETE FROM fts; DELETE FROM notes; DELETE FROM notefiles; DELETE FROM edits; DELETE FROM files; DELETE FROM folders; DELETE FROM excluded; VACUUM;")
     }
 
     // reading
@@ -4212,6 +4284,25 @@ final class DB {
             let badge = a.pages == 0 ? "in name" : (a.pages == 1 ? "1 page" : "\(a.pages) pages")
             return Hit(id: fid, path: a.path, page: a.page, badge: badge, snippet: DB.highlight(a.snippet))
         }
+    }
+
+    /// A save of highlights/notes made in PDF Search.
+    func markEdited(_ path: String, at time: Double) {
+        run("INSERT OR REPLACE INTO edits(path, time) VALUES (?,?)", [path, time])
+    }
+
+    /// PDFs you've changed highlights or notes in, newest first.
+    func recentFiles() -> [(id: Int, path: String, time: Double)] {
+        var out: [(id: Int, path: String, time: Double)] = []
+        guard let st = prepare("""
+            SELECT files.id, files.path, max(coalesce(files.edited, 0), coalesce(edits.time, 0)) AS t
+            FROM files LEFT JOIN edits ON edits.path = files.path
+            WHERE max(coalesce(files.edited, 0), coalesce(edits.time, 0)) > 0
+            ORDER BY t DESC
+            LIMIT 1000
+            """) else { return out }
+        while st.step() { out.append((st.int(0), st.text(1), st.double(2))) }
+        return out
     }
 
     /// Your highlights, notes, summaries and paper-note paragraphs that match, best first.

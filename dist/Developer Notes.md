@@ -167,7 +167,12 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
     size, FNV-1a file names). Entries without a PDF get an Open Library cover by ISBN
     (`covers.openlibrary.org/b/isbn/<isbn>-M.jpg?default=false`; a 404 is remembered, being offline isn't)
     or a symbol.
-13. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+13. **Recently Edited** (Search in ▸ Recently Edited, ⇧⌘E; sentinel scope `Library.recentScope`): papers whose
+    highlights/notes changed, newest first, labelled by `Library.when(_:)`. The time is
+    `max(files.edited, edits.time)`: `files.edited` is the newest annotation `modificationDate` found when indexing
+    (so edits made on another Mac count after a rescan), and `edits(path, time)` is written by `Library.afterSave`
+    on every save (so removing a highlight counts too). Opening a PDF doesn't count.
+14. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 
@@ -182,6 +187,8 @@ notes USING fts5(quote, comment, kind UNINDEXED, page UNINDEXED, label UNINDEXED
                  tokenize='unicode61 remove_diacritics 2')
       -- kind: h = highlight/note, s = "About this paper", o = a paragraph of a paper note (.md)
 notefiles(id INTEGER PRIMARY KEY, path TEXT UNIQUE, mtime REAL, pdf TEXT, key TEXT)
+edits(path TEXT PRIMARY KEY, time REAL)      -- saves of highlights/notes made in PDF Search
+      -- files also has `edited REAL`: newest annotation date in the PDF
       -- paper notes whose own text is indexed; pdf = the note's `pdf:` line as written
 ```
 
