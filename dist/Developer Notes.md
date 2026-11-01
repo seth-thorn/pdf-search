@@ -40,8 +40,7 @@ A universal (Apple Silicon + Intel) build compiles once per `-target` (`arm64-�
 | Bibliography | `library.bib`: `~/Obsidian Vault/library.bib` if that vault exists, else `~/Papers/library.bib` |
 | Reference collections | any other `.bib` in an added folder or one level down (e.g. a conference archive's own `.bib`) |
 | Paper notes | `@key.md` in `~/Obsidian Vault/Literature` if that vault exists, else `~/Papers/Notes` |
-| Collections | `<name>.md` (+ `<name>.bib`) in `~/Obsidian Vault/Collections`, else `~/Papers/Collections` |
-| Settings | user defaults `local.pdfsearch`: `papersFolder`, `libraryBib`, `notesFolder`, `collectionsFolder`, `writeNotes`, `scope`, `highlightColor`, `showMargin` |
+| Settings | user defaults `local.pdfsearch`: `papersFolder`, `libraryBib`, `notesFolder`, `writeNotes`, `scope`, `highlightColor`, `showMargin` |
 
 All paths are in `enum Paths` and editable in Settings (⌘,). Indexing never modifies PDFs.
 `file = {…}` fields in `library.bib`, the `pdf:` line of paper notes and `pdfsearch://` links store paths
@@ -62,9 +61,10 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
 2. **Main window**: `ContentView`: `NavigationSplitView`.
    - Sidebar: `scopeBar` (Search in picker + ••• menu), results `List` of `HitRow`s, `statusBar`.
    - Detail: optional `findBar` + `pdfArea` (the PDF view with overlays for "Select a PDF" /
-     "file moved"), plus a toolbar with: ‹ match counter › (only while there are matches), Cite (text menu),
-     Open in Obsidian (`openPaperNote`, creates the note if needed), Notes (column toggle) and ••• (Add to
-     Collection, Zoom to Fit, Open in Preview, Show in Finder). The notes column is resized with `ColumnHandle`
+     "file moved"), plus a toolbar with: ‹ match counter › (only while there are matches), Copy Citation (a plain
+     menu: `[@key]`, `[[@key]]` via `CiteStyle.obsidianLink`, `\cite{key}`, key), Open in Obsidian (`openPaperNote`;
+     `ensurePaperNote` creates the note if needed), Notes (column toggle), ••• (Zoom to Fit, Open in Preview,
+     Show in Finder) and Workflow (`WorkflowButton` / `WorkflowCard`, a shorthand popover). The notes column is resized with `ColumnHandle`
      (width in `@AppStorage("marginWidth")`); the PDF pane has 6 pt leading padding so PDFView doesn't fight the
      sidebar divider's resize cursor.
    - Find state: `showFind`, `findText`, `findFocused`. `activeTerms` = find text when the bar has
@@ -131,13 +131,8 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    note (`## Summary`, then `## Essential` and `## Interesting`, or just `## Marginalia` when nothing is
    Essential; each in page order); everything outside it is the user's. Links in notes are `pdfsearch://open?file=…&page=N`,
    handled by `Library.handle(_:)` (from `.onOpenURL` and the app delegate) → `linkRequest`.
-7. **Collections**: `Collection` (name, path, ordered keys parsed from every `@key` in the note) and
-   `Library.reloadCollections()` (on launch and whenever the app comes to the front). `addToCollection`
-   appends `- [[@key]] Author (Year) Title` (after `ensureInLibrary`), `newCollection`,
-   `removeFromCollection` (drops lines mentioning the key), `makeBibliography` (writes `<name>.bib`).
-   A collection is a "Search in" scope: `runSearchNow` searches everything and keeps hits whose entry
-   key is in the collection; an empty query lists it in the note's order. `CollectionMenu` is the
-   "Add to Collection" menu used in the toolbar, results context menu and `EntryCard`.
+7. **Projects** are left to the notes app (collections were removed in 2.7): a project note holds `[[@key]]`
+   links, and *Copy Citation ▸ [[@key]]* copies one (creating the paper note first, so the link resolves).
 8. **Adding papers**: `EntryKind`, `Lookup` (DOI / arXiv / ISBN detection; `doi.org` content negotiation
    for CSL-JSON, used for Crossref, DataCite/Zenodo and arXiv `10.48550/arXiv.<id>` DOIs; Crossref
    `query.bibliographic` title search; Open Library `api/books?jscmd=data` then Google Books for ISBNs;

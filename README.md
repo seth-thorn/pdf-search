@@ -44,16 +44,16 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 - **See them.** Each result shows a thumbnail of the PDF's first page (a book's cover, a paper's first page); books without a PDF show their cover from Open Library.
 - **Read.** Click a result and the PDF opens at the first match, with every match marked. ⌘G steps through them, and ⌘F finds within the open PDF.
 - **Write in the margins.** Select a passage and press **H**. It's highlighted, and a note box opens in the notes column beside the PDF. Every highlight has a note box, which saves as you type. Tick **Essential** on the few passages that matter most (they turn red-pink; the rest stay yellow). Each highlight has a clear Remove button. An **About this paper** box holds notes on the whole paper. Notes are saved *inside the PDF* as standard comments, so Preview, Acrobat and other apps see them too, and they're searchable.
-- **Cite.** PDFs are matched to entries in a plain `library.bib`, so results show real titles and authors. ⇧⌘C copies `[@cascone2000aesthetics]` (Markdown/Pandoc), and ⌥⇧⌘C copies `\cite{cascone2000aesthetics}` (LaTeX/Overleaf). Books you don't have as PDFs live in the same bibliography.
-- **Collections.** A reading list for each thing you're writing, kept as a plain Markdown note (`- [[@key]] Author (Year) Title`). Add papers with one click, browse a collection like a folder, and turn it into a `.bib` file for Overleaf or Pandoc.
+- **Cite.** PDFs are matched to entries in a plain `library.bib`, so results show real titles and authors. **Copy Citation ▾** copies `[@cascone2000aesthetics]` (Markdown/Pandoc, ⇧⌘C), `[[@cascone2000aesthetics]]` (a link to the paper's note in Obsidian) or `\cite{cascone2000aesthetics}` (LaTeX/Overleaf, ⌥⇧⌘C). Books you don't have as PDFs live in the same bibliography.
+- **Projects live in your notes app.** For each thing you're writing, keep a note with `[[@key]]` links to its papers; in Obsidian, backlinks show which projects a paper belongs to.
 - **Search your own notes.** **Search in ▸ My Notes** (⇧⌘F) searches only what you've written: highlighted passages, your notes on them, paper summaries, and your own writing in the paper notes. Each note is a result; click one to jump to it in the PDF, or right-click → *Copy Quote with Citation* for `“…” [@key, p. 12]`. Ordinary searches also show any of your notes that match.
 - **Pick up where you left off.** **Search in ▸ Recently Edited** (⇧⌘E) lists the papers you've highlighted or written notes in, newest first.
-- **Simple toolbar.** Just **Cite**, **Open in Obsidian**, **Notes** and a **•••** menu (plus ‹ › while searching). Drag the dividers to resize the results and notes columns.
+- **Simple toolbar.** Just **Copy Citation**, **Open in Obsidian**, **Notes**, **•••** and **Workflow** (a one-screen reminder of how it all fits together), plus ‹ › while searching. Drag the dividers to resize the results and notes columns.
 - **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote (Essential passages first), a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
 
 **Portable.** File paths in `library.bib` and the notes are relative to the Papers folder, so the whole library can move to another Mac or an external drive.
 
-**Obsidian is optional.** If you have a folder called `Obsidian Vault` in your home folder, `library.bib`, the paper notes (`Literature/`) and collections (`Collections/`) go there. Otherwise they go in `~/Papers` (`library.bib`, `Notes/`, `Collections/`). You can open them with any text editor or notes app, and change all of this in **Settings (⌘,)**.
+**Obsidian is optional.** If you have a folder called `Obsidian Vault` in your home folder, `library.bib` and the paper notes (`Literature/`) go there. Otherwise they go in `~/Papers` (`library.bib`, `Notes/`). You can open them with any text editor or notes app, and change all of this in **Settings (⌘,)**.
 
 It's one Swift file (SwiftUI + PDFKit + SQLite full-text search) with no dependencies. Requires macOS 13 or later.
 
@@ -78,7 +78,7 @@ Because you build it yourself, macOS doesn't show the "unverified developer" war
 ```
 ~/Papers/
 ├── Library/        ← your own papers, ideally named by citation key (cascone2000aesthetics.pdf)
-└── …               ← any other collections (conference proceedings, course readings…)
+└── …               ← any other folders of PDFs (conference proceedings, course readings…)
 ```
 
 PDF Search indexes `~/Papers` automatically. Each folder inside it can be searched on its own with the "Search in" menu. You can also drag any other folder into the window.
@@ -104,7 +104,7 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 | ⌘R | rescan folders |
 | ⌘0 | zoom to fit |
 | ⌥⌘O | open the paper's Markdown note (in Obsidian if you use it; created if needed) |
-| ⌘, | settings: papers folder, `library.bib` location, notes and collections folders |
+| ⌘, | settings: papers folder, `library.bib` location, notes folder |
 
 More detail is in **[PDF Search Guide.pdf](dist/PDF%20Search%20Guide.pdf)**. To try it quickly, drag the `test-pdfs` folder in and search for `glitch`.
 
@@ -112,7 +112,6 @@ More detail is in **[PDF Search Guide.pdf](dist/PDF%20Search%20Guide.pdf)**. To 
 
 - **Markdown (Obsidian, iA Writer, any editor) + Pandoc:** cite with `[@key]`, then export with `pandoc paper.md --citeproc --bibliography ~/Papers/library.bib -o paper.pdf` (or `.docx`). Add `--csl apa.csl` for a specific style.
 - **LaTeX / Overleaf:** upload `library.bib` and cite with `\cite{key}`.
-- A collection's ••• menu has **Make Bibliography (.bib)**: just that project's entries, ready for Overleaf.
 - The `@key.md` paper notes already contain your quotes with page-cited references, ready to paste into a draft.
 
 ## Repository layout

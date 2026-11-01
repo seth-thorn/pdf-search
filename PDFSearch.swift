@@ -73,7 +73,6 @@ struct SettingsView: View {
     @State private var papers = Paths.papers
     @State private var bib = Paths.libraryBib
     @State private var notes = Paths.notesFolder
-    @State private var collections = Paths.collectionsFolder
     @AppStorage("writeNotes") private var writeNotes = true
 
     var body: some View {
@@ -90,9 +89,6 @@ struct SettingsView: View {
                 set("notesFolder", path); notes = Paths.notesFolder; lib.syncOwnNotesSoon()
             } reset: { set("notesFolder", nil); notes = Paths.notesFolder; lib.syncOwnNotesSoon() }
                 .disabled(!writeNotes)
-            row("Collections folder", collections, help: "One Markdown note per collection, listing its papers as [[@key]] lines.") { path in
-                set("collectionsFolder", path); collections = Paths.collectionsFolder; lib.reloadCollections()
-            } reset: { set("collectionsFolder", nil); collections = Paths.collectionsFolder; lib.reloadCollections() }
         }
         .padding(20)
         .frame(width: 560)
@@ -212,12 +208,10 @@ struct ContentView: View {
     var searchPrompt: String {
         if inMyNotes { return "Search your notes" }
         if inRecent { return "Search recently edited papers" }
-        if let c = scopeCollection { return "Search \(c.name)" }
         if let s = lib.scope, let f = lib.folders.first(where: { $0.path == s }) { return "Search \(f.name)" }
         return "Search everything"
     }
     var scopeFolder: Folder? { lib.scope.flatMap { s in lib.folders.first { $0.path == s } } }
-    var scopeCollection: Collection? { lib.scope.flatMap { s in lib.collections.first { $0.path == s } } }
     var inMyNotes: Bool { lib.scope == Library.myNotesScope }
     var inRecent: Bool { lib.scope == Library.recentScope }
 
@@ -238,13 +232,6 @@ struct ContentView: View {
                     Text(verbatim: String(repeating: "\u{2003}", count: f.depth) + "\(f.name)  (\(f.count))")
                         .tag(Optional(f.path))
                 }
-                if !lib.collections.isEmpty {
-                    Divider()
-                    ForEach(lib.collections) { c in
-                        Label("\(c.name)  (\(c.keys.count))", systemImage: "books.vertical")
-                            .tag(Optional(c.path))
-                    }
-                }
             }
             .pickerStyle(.menu)
             Menu {
@@ -252,11 +239,6 @@ struct ContentView: View {
                     Button("Show Notes Folder in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: Paths.notesFolder)])
                     }
-                }
-                if let c = scopeCollection {
-                    Button("Make Bibliography (.bib)") { lib.makeBibliography(c) }
-                    Button("Open Collection Note") { NSWorkspace.shared.open(URL(fileURLWithPath: c.path)) }
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: c.path)]) }
                 }
                 if let f = scopeFolder {
                     if f.isRoot { Button("Rename…") { lib.renameFolder(f.path) } }
@@ -273,7 +255,7 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(lib.scope == nil || inRecent)
-            .help("Folder, collection or notes options")
+            .help("Folder or notes options")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -281,7 +263,7 @@ struct ContentView: View {
 
     var sidebar: some View {
         VStack(spacing: 0) {
-            if !lib.folders.isEmpty || !lib.collections.isEmpty {
+            if !lib.folders.isEmpty {
                 scopeBar
                 Divider()
             }
@@ -298,13 +280,10 @@ struct ContentView: View {
                         }
                     }
                     Button("Copy Citation [@key]") { citeHit(ids, .pandoc) }
+                    Button("Copy Obsidian Link [[@key]]") { citeHit(ids, .obsidianLink) }
                     Button("Copy LaTeX Citation \\cite{key}") { citeHit(ids, .latex) }
                     if let h = hitFor(ids), !(h.path.isEmpty && h.entry == nil) {
                         Button(Marginalia.notesInVault ? "Open in Obsidian" : "Open Paper Note") { lib.openPaperNote(for: h) }
-                    }
-                    CollectionMenu(target: { entryFor(ids) })
-                    if let c = scopeCollection, let e = entryFor(ids) {
-                        Button("Remove from “\(c.name)”") { lib.removeFromCollection(e.key, c) }
                     }
                     Divider()
                     if let id = ids.first, let h = lib.results.first(where: { $0.id == id }), !h.path.isEmpty, h.entry == nil {
@@ -493,16 +472,18 @@ struct ContentView: View {
                             .help("Next match (⌘G)")
                     }
                     Menu {
-                        Button("Copy [@key] for Obsidian / Markdown") { cite(.pandoc) }
-                        Button("Copy \\cite{key} for LaTeX / Overleaf") { cite(.latex) }
-                        Button("Copy Key Only") { cite(.key) }
+                        Section("Copy to the clipboard, then paste:") {
+                            Button("[@key]   a citation in Obsidian / Pandoc   ⇧⌘C") { cite(.pandoc) }
+                            Button("[[@key]]   a link to this paper's note in Obsidian") { cite(.obsidianLink) }
+                            Button("\\cite{key}   a citation in LaTeX / Overleaf   ⌥⇧⌘C") { cite(.latex) }
+                            Button("key   just the citation key") { cite(.key) }
+                        }
                     } label: {
-                        Text("Cite")
-                    } primaryAction: {
-                        cite(.pandoc)
+                        Text("Copy Citation")
                     }
+                        .menuIndicator(.visible)
                         .disabled(viewer.path == nil && entryOnly == nil)
-                        .help("Copy a citation for this paper: click for [@key], or open the menu for \\cite{key} (⇧⌘C / ⌥⇧⌘C)")
+                        .help("Copy this paper's citation or Obsidian link, then paste it into your writing")
                     Button { openPaperNote() } label: { Text(Marginalia.notesInVault ? "Open in Obsidian" : "Open Note") }
                         .disabled(viewer.path == nil && entryOnly == nil)
                         .help("Open this paper's note (your highlights and notes, as Markdown), creating it if needed (⌥⌘O)")
@@ -510,8 +491,6 @@ struct ContentView: View {
                         .toggleStyle(.button)
                         .help("Show or hide the notes column (your highlights and notes)")
                     Menu {
-                        CollectionMenu(target: { currentEntry })
-                        Divider()
                         Button("Zoom to Fit  ⌘0") { viewer.zoomToFit() }
                             .disabled(viewer.path == nil)
                         Button("Open in Preview") {
@@ -526,7 +505,8 @@ struct ContentView: View {
                         Label("More", systemImage: "ellipsis.circle")
                     }
                         .disabled(viewer.path == nil && entryOnly == nil)
-                        .help("More: add to a collection, zoom to fit, open in Preview, show in Finder")
+                        .help("More: zoom to fit, open in Preview, show in Finder")
+                    WorkflowButton()
                 }
             }
     }
@@ -687,6 +667,44 @@ struct HitRow: View {
             }
         }
         .padding(.vertical, 3)
+    }
+}
+
+/// The "Workflow" toolbar button: a pocket reminder of how the whole thing is meant to be used.
+struct WorkflowButton: View {
+    @State private var show = false
+    var body: some View {
+        Button { show.toggle() } label: { Text("Workflow") }
+            .help("A one-screen reminder of the workflow")
+            .popover(isPresented: $show, arrowEdge: .bottom) { WorkflowCard() }
+    }
+}
+
+struct WorkflowCard: View {
+    private let rows: [(String, String)] = [
+        ("ADD",   "drop a PDF on the window → check the card → Add"),
+        ("FIND",  "type · Search in: everything, a folder, My Notes ⇧⌘F, Recently Edited ⇧⌘E"),
+        ("READ",  "click a result · ⌘G next match · ⌘F find in this PDF"),
+        ("MARK",  "select text → H → type your note · ☐ Essential = a key passage"),
+        ("KEEP",  "notes live in the PDF · copied to Obsidian automatically (Literature/@key)"),
+        ("THINK", "Open in Obsidian ⌥⌘O · write under ## Notes · link papers with [[@key]]"),
+        ("CITE",  "Copy Citation → [@key] Obsidian/Pandoc · \\cite{key} LaTeX"),
+    ]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Workflow").font(.headline)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 7) {
+                ForEach(rows.indices, id: \.self) { i in
+                    GridRow {
+                        Text(rows[i].0).font(.caption.monospaced().weight(.bold)).foregroundStyle(.secondary)
+                        Text(rows[i].1).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            Text("Full manual: PDF Search Manual in your vault").font(.caption).foregroundStyle(.tertiary)
+        }
+        .padding(16)
+        .frame(width: 470)
     }
 }
 
@@ -897,23 +915,6 @@ final class Thumbnails {
     }
 }
 
-/// "Add to Collection ▸ <collections> / New Collection…" for one paper or book.
-struct CollectionMenu: View {
-    @EnvironmentObject var lib: Library
-    let target: () -> BibEntry?
-    var body: some View {
-        Menu {
-            ForEach(lib.collections) { c in
-                Button(c.name) { lib.addToCollection(target(), c) }
-            }
-            if !lib.collections.isEmpty { Divider() }
-            Button("New Collection…") { lib.newCollection(adding: target()) }
-        } label: {
-            Label("Add to Collection", systemImage: "text.badge.plus")
-        }
-    }
-}
-
 /// Shown instead of a PDF for library entries without one (books you don't have as PDFs, etc.).
 struct EntryCard: View {
     let entry: BibEntry
@@ -941,8 +942,8 @@ struct EntryCard: View {
             .padding(.top, 4)
             HStack(spacing: 8) {
                 Button("Copy [@\(entry.key)]") { cite(.pandoc) }
+                Button("Copy [[@\(entry.key)]]") { cite(.obsidianLink) }
                 Button("Copy \\cite{\(entry.key)}") { cite(.latex) }
-                CollectionMenu(target: { entry }).fixedSize()
             }
             .padding(.top, 8)
         }
@@ -1430,7 +1431,6 @@ enum Paths {
     static var libraryFolder: String { papers + "/Library" }
     static var libraryBib: String { setting("libraryBib") ?? (vault.map { $0 + "/library.bib" } ?? papers + "/library.bib") }
     static var notesFolder: String { setting("notesFolder") ?? (vault.map { $0 + "/Literature" } ?? papers + "/Notes") }
-    static var collectionsFolder: String { setting("collectionsFolder") ?? (vault.map { $0 + "/Collections" } ?? papers + "/Collections") }
     /// "Library/x.pdf" for files inside the Papers folder (so library.bib and notes work wherever
     /// that folder lives: home folder, USB stick, another Mac); anything else stays a full path.
     static func relative(_ path: String) -> String {
@@ -1447,7 +1447,7 @@ enum Paths {
     static var writeNotes: Bool { UserDefaults.standard.object(forKey: "writeNotes") as? Bool ?? true }
 }
 
-enum CiteStyle { case pandoc, latex, key }
+enum CiteStyle { case pandoc, obsidianLink, latex, key }
 
 struct AddRequest: Identifiable {
     let id = UUID()
@@ -1577,31 +1577,6 @@ struct Folder: Identifiable, Hashable {
     var id: String { path }
 }
 
-/// A collection: a Markdown note listing papers for something you're writing. Any `@key` in the
-/// file counts (e.g. `- [[@cascone2000aesthetics]] Cascone (2000) The Aesthetics of Failure`).
-struct Collection: Identifiable, Equatable {
-    let name: String
-    let path: String
-    let keys: [String]
-    var id: String { path }
-    var keySet: Set<String> { Set(keys) }
-
-    private static let keyPattern = try! NSRegularExpression(
-        pattern: "(?<![A-Za-z0-9_.])@([A-Za-z0-9_](?:[A-Za-z0-9_:.\\-]*[A-Za-z0-9_])?)")
-
-    /// every @key in the text, in order, without repeats
-    static func keys(in text: String) -> [String] {
-        let ns = text as NSString
-        var seen = Set<String>()
-        var out: [String] = []
-        for m in keyPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            let k = ns.substring(with: m.range(at: 1))
-            if seen.insert(k).inserted { out.append(k) }
-        }
-        return out
-    }
-}
-
 final class Library: ObservableObject {
     static let shared = Library()
     /// the "Search in ▸ My Notes" choice (not a folder path)
@@ -1635,8 +1610,6 @@ final class Library: ObservableObject {
     /// the "Add to Library" card being shown (nil file = a book or chapter without a PDF)
     @Published var addRequest: AddRequest?
     private var addQueue: [URL?] = []
-    /// Markdown collections in Paths.collectionsFolder
-    @Published private(set) var collections: [Collection] = []
     /// short confirmation shown in the status bar ("Copied [@key]")
     @Published private(set) var flash: String?
     private var flashGen = 0
@@ -1673,27 +1646,8 @@ final class Library: ObservableObject {
         // pick up edits to library.bib (or new reference .bib files) whenever the app comes to the front
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.reloadBib()
-            self?.reloadCollections()
             self?.syncOwnNotesSoon()   // what you wrote in your paper notes since
         }
-        reloadCollections()
-    }
-
-    // MARK: collections
-
-    func reloadCollections() {
-        let dir = Paths.collectionsFolder
-        var out: [Collection] = []
-        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
-        where f.lowercased().hasSuffix(".md") && !f.hasPrefix(".") {
-            let path = dir + "/" + f
-            let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-            out.append(Collection(name: (f as NSString).deletingPathExtension, path: path, keys: Collection.keys(in: text)))
-        }
-        out.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        guard out != collections else { return }
-        collections = out
-        if let s = scope, out.contains(where: { $0.path == s }) { runSearchNow() }
     }
 
     private func noDetailsAlert() {
@@ -1703,97 +1657,12 @@ final class Library: ObservableObject {
         alert.runModal()
     }
 
-    /// Append "- [[@key]] Author (Year) Title" to a collection's note.
-    func addToCollection(_ entry: BibEntry?, _ c: Collection) {
-        guard let e0 = entry else { noDetailsAlert(); return }
-        guard let e = ensureInLibrary(e0)?.entry else { return }
-        if c.keys.contains(e.key) { showFlash("Already in \(c.name)"); return }
-        var text = (try? String(contentsOfFile: c.path, encoding: .utf8)) ?? "# \(c.name)\n\n"
-        if !text.hasSuffix("\n") { text += "\n" }
-        text += "- [[@\(e.key)]] \(e.shortCite) \(e.title)\n"
-        do {
-            try text.write(toFile: c.path, atomically: true, encoding: .utf8)
-            reloadCollections()
-            showFlash("Added \(e.shortCite) to \(c.name)")
-        } catch {
-            showFlash("Couldn't write \(c.name).md: \(error.localizedDescription)")
-        }
-    }
-
-    /// Ask for a name, create <name>.md, and optionally add a first item.
-    func newCollection(adding entry: BibEntry?) {
-        let dir = Paths.collectionsFolder
-        let alert = NSAlert()
-        alert.messageText = "New collection"
-        alert.informativeText = "A collection is a list of papers and books for something you're writing. It's saved as a Markdown note in \(dir.replacingOccurrences(of: NSHomeDirectory(), with: "~"))."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        field.placeholderString = "e.g. Glitch Aesthetics paper"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Create")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
-        guard !name.isEmpty else { return }
-        let path = dir + "/" + name + ".md"
-        do {
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: path) {
-                try "# \(name)\n\nPapers and books for this project, one per line. PDF Search adds lines here; edit, reorder or comment on them freely.\n\n"
-                    .write(toFile: path, atomically: true, encoding: .utf8)
-            }
-        } catch {
-            showFlash("Couldn't create the collection: \(error.localizedDescription)")
-            return
-        }
-        reloadCollections()
-        if let e = entry, let c = collections.first(where: { $0.path == path }) { addToCollection(e, c) }
-        else { showFlash("Created collection \(name)") }
-    }
-
-    /// Delete the line(s) that mention @key from a collection's note.
-    func removeFromCollection(_ key: String, _ c: Collection) {
-        guard let text = try? String(contentsOfFile: c.path, encoding: .utf8) else { return }
-        let kept = text.components(separatedBy: "\n").filter { !Collection.keys(in: $0).contains(key) }
-        do {
-            try kept.joined(separator: "\n").write(toFile: c.path, atomically: true, encoding: .utf8)
-            reloadCollections()
-            showFlash("Removed from \(c.name)")
-        } catch {
-            showFlash("Couldn't write \(c.name).md: \(error.localizedDescription)")
-        }
-    }
-
-    /// Write <collection>.bib next to the note, with just its entries (for Overleaf, Pandoc…).
-    func makeBibliography(_ c: Collection) {
-        var out = "% Bibliography for \(c.name), made by PDF Search from \(c.name).md\n\n"
-        var n = 0
-        var missing: [String] = []
-        for k in c.keys {
-            guard let e = bib.entries.first(where: { $0.inLibrary && $0.key == k }) else { missing.append(k); continue }
-            var fields = e.raw
-            fields["file"] = nil
-            out += BibWriter.format(type: e.type, key: e.key, fields: fields, file: nil) + "\n"
-            n += 1
-        }
-        let path = (c.path as NSString).deletingPathExtension + ".bib"
-        do {
-            try out.write(toFile: path, atomically: true, encoding: .utf8)
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-            showFlash("Wrote \(c.name).bib with \(n) entries" + (missing.isEmpty ? "" : " (not in library.bib: " + missing.joined(separator: ", ") + ")"))
-        } catch {
-            showFlash("Couldn't write \(c.name).bib: \(error.localizedDescription)")
-        }
-    }
-
     // MARK: bibliography
 
     /// Re-read library.bib plus any .bib file in an added folder or the folders directly inside it.
     func reloadBib(force: Bool = false) {
         let roots = Array(Set(folders.filter { $0.isRoot }.map(\.path) + [Paths.papers]))
         let libPath = Paths.libraryBib
-        let collectionsDir = Paths.collectionsFolder
         bibQ.async {
             let fm = FileManager.default
             var files: [(path: String, isLibrary: Bool)] = [(libPath, true)]
@@ -1804,7 +1673,6 @@ final class Library: ObservableObject {
                     if fm.fileExists(atPath: root + "/" + k, isDirectory: &isDir), isDir.boolValue { dirs.append(root + "/" + k) }
                 }
                 for d in dirs {
-                    if d == collectionsDir { continue }
                     for f in (try? fm.contentsOfDirectory(atPath: d)) ?? [] where f.lowercased().hasSuffix(".bib") {
                         let p = d + "/" + f
                         if p != libPath && !files.contains(where: { $0.path == p }) { files.append((p, false)) }
@@ -1863,6 +1731,10 @@ final class Library: ObservableObject {
         let text: String
         switch style {
         case .pandoc: text = "[@\(e.key)]"
+        case .obsidianLink:
+            // make sure the note exists, so the link isn't a dead end (and isn't created in the wrong folder)
+            text = "[[@\(e.key)]]"
+            if let p = path { ensurePaperNote(pdf: p) } else { ensurePaperNote(entry: e) }
         case .latex: text = "\\cite{\(e.key)}"
         case .key: text = e.key
         }
@@ -2194,25 +2066,36 @@ final class Library: ObservableObject {
     /// Open the paper's Markdown note (in Obsidian when the notes folder is in a vault), creating it first
     /// if there isn't one yet, so there's somewhere to write before you've highlighted anything.
     func openPaperNote(pdf path: String) {
+        if let note = ensurePaperNote(pdf: path) { Marginalia.openNote(note) }
+    }
+
+    func openPaperNote(entry: BibEntry) {
+        if let note = ensurePaperNote(entry: entry) { Marginalia.openNote(note) }
+    }
+
+    /// The paper's note, created first if needed. nil if notes are turned off or it couldn't be written.
+    @discardableResult
+    func ensurePaperNote(pdf path: String) -> String? {
         var entry = bib.entry(forPath: path)
         if let e = entry, !e.inLibrary { entry = ensureInLibrary(e)?.entry ?? e }
         let note = Marginalia.notePath(pdfPath: path, entry: entry)
         if !FileManager.default.fileExists(atPath: note) {
-            guard Paths.writeNotes else { showFlash("Paper notes are turned off in Settings (⌘,)"); return }
+            guard Paths.writeNotes else { showFlash("Paper notes are turned off in Settings (⌘,)"); return nil }
             let doc = PDFDocument(url: URL(fileURLWithPath: path))
             Marginalia.mirror(pdfPath: path, entry: entry, notes: doc.map(Marginalia.collect) ?? [],
                               summary: doc.map(Marginalia.summary) ?? "", create: true)
         }
-        if FileManager.default.fileExists(atPath: note) { Marginalia.openNote(note) }
+        return FileManager.default.fileExists(atPath: note) ? note : nil
     }
 
     /// The same for a book or other entry without a PDF.
-    func openPaperNote(entry e0: BibEntry) {
+    @discardableResult
+    func ensurePaperNote(entry e0: BibEntry) -> String? {
         var e = e0
         if !e.inLibrary { e = ensureInLibrary(e)?.entry ?? e }
         let note = Marginalia.folder + "/" + Marginalia.noteFileName(key: e.key)
         if !FileManager.default.fileExists(atPath: note) {
-            guard Paths.writeNotes else { showFlash("Paper notes are turned off in Settings (⌘,)"); return }
+            guard Paths.writeNotes else { showFlash("Paper notes are turned off in Settings (⌘,)"); return nil }
             var t = "---\ncitekey: \(e.key)\ntitle: \(Marginalia.yaml(e.title))\n"
             if !e.people.isEmpty { t += "authors: \(Marginalia.yaml(e.people.joined(separator: "; ")))\n" }
             if !e.year.isEmpty { t += "year: \(e.year)\n" }
@@ -2221,10 +2104,10 @@ final class Library: ObservableObject {
                 try FileManager.default.createDirectory(atPath: Marginalia.folder, withIntermediateDirectories: true)
                 try t.write(toFile: note, atomically: true, encoding: .utf8)
             } catch {
-                showFlash("Couldn't write the note: \(error.localizedDescription)"); return
+                showFlash("Couldn't write the note: \(error.localizedDescription)"); return nil
             }
         }
-        Marginalia.openNote(note)
+        return note
     }
 
     func openPaperNote(for hit: Hit) {
@@ -2325,8 +2208,7 @@ final class Library: ObservableObject {
             self.docCount = n
             self.folders = f
             self.indexedPaths = paths
-            if let s = self.scope, s != Library.myNotesScope, s != Library.recentScope, !f.contains(where: { $0.path == s }),
-               !self.collections.contains(where: { $0.path == s }) { self.scope = nil }
+            if let s = self.scope, s != Library.myNotesScope, s != Library.recentScope, !f.contains(where: { $0.path == s }) { self.scope = nil }
         }
     }
 
@@ -2421,8 +2303,7 @@ final class Library: ObservableObject {
         let q = query
         let myNotes = self.scope == Library.myNotesScope
         let recent = self.scope == Library.recentScope
-        let coll = collections.first { $0.path == self.scope }
-        let scope = (coll == nil && !myNotes && !recent) ? self.scope : nil   // a collection searches everything, then filters
+        let scope = (!myNotes && !recent) ? self.scope : nil
         let bib = self.bib
         let indexed = self.indexedPaths
         readQ.async {
@@ -2475,16 +2356,12 @@ final class Library: ObservableObject {
                 self.attachNotes(&hits, fts: fts, scope: scope, bib: bib, indexed: indexed)
             }
             for i in hits.indices where hits[i].entry == nil { hits[i].entry = bib.entry(forPath: hits[i].path) }
-            let keySet = coll?.keySet ?? []
-            if coll != nil {
-                hits = hits.filter { h in h.entry.map { $0.inLibrary && keySet.contains($0.key) } ?? false }
-            }
             // library entries without an indexed PDF (books etc.) belong to the Library folder
             let lib = Paths.libraryFolder
-            if coll != nil || scope == nil || scope == lib || lib.hasPrefix(scope! + "/") {
+            if scope == nil || scope == lib || lib.hasPrefix(scope! + "/") {
                 let folded = terms.map(BibIndex.fold).filter { !$0.isEmpty }
                 let listed = Set(hits.compactMap { $0.path.isEmpty ? $0.entry?.key : nil })
-                for (i, e) in bib.entries.enumerated() where e.inLibrary && (coll == nil || keySet.contains(e.key)) {
+                for (i, e) in bib.entries.enumerated() where e.inLibrary {
                     if listed.contains(e.key) { continue }
                     if let f = e.file, indexed.contains(BibIndex.norm(f)) { continue }
                     if indexed.contains(BibIndex.norm(lib + "/" + e.key + ".pdf")) { continue }
@@ -2492,11 +2369,7 @@ final class Library: ObservableObject {
                     hits.append(Hit(id: -(i + 1), path: "", page: 0, badge: e.kindLabel + " · no PDF", snippet: nil, entry: e))
                 }
             }
-            if empty, let c = coll {
-                // a collection lists its items in the order of the note
-                let order = Dictionary(c.keys.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
-                hits.sort { (order[$0.entry?.key ?? ""] ?? Int.max) < (order[$1.entry?.key ?? ""] ?? Int.max) }
-            } else if empty {
+            if empty {
                 hits.sort { $0.sortKey.localizedStandardCompare($1.sortKey) == .orderedAscending }
             }
             let n = self.reader.count(scope: scope)
@@ -3073,7 +2946,6 @@ enum SelfTest {
         print("SELFTEST write:\n" + BibWriter.format(type: "book", key: "k", fields: ["title": "A & B – C", "author": "Smith, J", "url": "http://x.org/a_b"], file: "/p/k.pdf"))
         let round = BibParser.parse(BibWriter.format(type: "book", key: "k", fields: ["title": "A & B – C"], file: "/p/k.pdf"), inLibrary: true)
         print("SELFTEST roundtrip: \(round.first?.title ?? "FAIL") file=\(round.first?.file ?? "-")")
-        print("SELFTEST collection keys: \(Collection.keys(in: "- [[@cascone2000aesthetics]] x\n- [@menkman2011glitch, p. 3] mail me@x.com\n@collins2006handmade. and @cascone2000aesthetics again"))")
         print("SELFTEST ids: doi=\(Lookup.doi(in: "https://doi.org/10.1162/014892600559489.") ?? "-") arxiv=\(Lookup.arxiv(in: "arXiv:2103.01234v2 [cs.SD]") ?? "-") isbn=\(Lookup.isbn(in: "ISBN 978-0-415-99873-4") ?? "-") isbnText=\(Lookup.isbnInText("Printed in UK. ISBN-13: 978-0-415-99873-4 (pbk)") ?? "-") notIsbn=\(Lookup.isbn(in: "The Aesthetics of Failure") ?? "-") name=\(Lookup.lastFirst("Kim Cascone")) kind=\(Lookup.kind("journal-article").rawValue)")
         let inPapers = Paths.papers + "/Library/smith2019glitch.pdf"
         print("SELFTEST relative: \(Paths.relative(inPapers)) | back: \(Paths.absolute(Paths.relative(inPapers)) == inPapers) | outside stays: \(Paths.relative("/tmp/x.pdf")) | bib field: \(BibParser.filePath("Library/smith2019glitch.pdf") == inPapers) | jabref: \(BibParser.filePath(":/Users/x/a b.pdf:PDF") ?? "-")")
