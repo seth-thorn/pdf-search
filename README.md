@@ -13,6 +13,7 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 - **Collections.** A reading list for each thing you're writing, kept as a plain Markdown note (`- [[@key]] Author (Year) Title`). Add papers with one click, browse a collection like a folder, and turn it into a `.bib` file for Overleaf or Pandoc.
 - **Search your own notes.** **Search in ▸ My Notes** (⇧⌘F) searches only what you've written: highlighted passages, your notes on them, paper summaries, and your own writing in the paper notes. Each note is a result; click one to jump to it in the PDF, or right-click → *Copy Quote with Citation* for `“…” [@key, p. 12]`. Ordinary searches also show any of your notes that match.
 - **Pick up where you left off.** **Search in ▸ Recently Edited** (⇧⌘E) lists the papers you've highlighted or written notes in, newest first.
+- **Simple toolbar.** Just **Cite**, **Open in Obsidian**, **Notes** and a **•••** menu (plus ‹ › while searching). Drag the dividers to resize the results and notes columns.
 - **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote (Essential passages first), a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
 
 **Portable.** File paths in `library.bib` and the notes are relative to the Papers folder, so the whole library can move to another Mac or an external drive.
@@ -67,6 +68,7 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 | ⌘O / ⇧⌘O | add a paper (PDF) / add a book or chapter (ISBN) |
 | ⌘R | rescan folders |
 | ⌘0 | zoom to fit |
+| ⌥⌘O | open the paper's Markdown note (in Obsidian if you use it; created if needed) |
 | ⌘, | settings: papers folder, `library.bib` location, notes and collections folders |
 
 More detail is in **[PDF Search Guide.pdf](dist/PDF%20Search%20Guide.pdf)**. To try it quickly, drag the `test-pdfs` folder in and search for `glitch`.

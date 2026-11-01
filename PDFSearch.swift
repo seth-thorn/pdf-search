@@ -35,8 +35,15 @@ struct PDFSearchApp: App {
                 Divider()
                 Button("Rescan Folders") { lib.refresh() }
                     .keyboardShortcut("r")
+                Button(Marginalia.notesInVault ? "Open Paper Note in Obsidian" : "Open Paper Note") { lib.openNoteRequest += 1 }
+                    .keyboardShortcut("o", modifiers: [.command, .option])
                 Button("Write Notes for All Annotated PDFs") { lib.exportAllMarginalia() }
                 Button("Clear Index…") { lib.confirmClear() }
+            }
+            CommandGroup(before: .toolbar) {
+                Button("Zoom to Fit") { lib.zoomRequest += 1 }
+                    .keyboardShortcut("0", modifiers: .command)
+                Divider()
             }
             CommandGroup(replacing: .textEditing) {
                 Button("Find in This PDF…") { lib.findRequest += 1 }
@@ -135,6 +142,7 @@ struct ContentView: View {
     @State private var dropTargeted = false
     @State private var showFind = false
     @AppStorage("showMargin") private var showMargin = true
+    @AppStorage("marginWidth") private var marginWidth: Double = 290
     /// a library entry with no PDF (e.g. a book), shown as a card instead of a PDF
     @State private var entryOnly: BibEntry?
     @State private var findText = ""
@@ -190,6 +198,8 @@ struct ContentView: View {
             AddPaperView(file: req.file).environmentObject(lib)
         }
         .onChange(of: lib.citeTexRequest) { _ in cite(.latex) }
+        .onChange(of: lib.zoomRequest) { _ in viewer.zoomToFit() }
+        .onChange(of: lib.openNoteRequest) { _ in openPaperNote() }
         .task(id: findText) {
             guard showFind else { return }
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -289,8 +299,8 @@ struct ContentView: View {
                     }
                     Button("Copy Citation [@key]") { citeHit(ids, .pandoc) }
                     Button("Copy LaTeX Citation \\cite{key}") { citeHit(ids, .latex) }
-                    if let h = hitFor(ids), let note = lib.paperNotePath(for: h) {
-                        Button("Open Paper Note") { Marginalia.openNote(note) }
+                    if let h = hitFor(ids), !(h.path.isEmpty && h.entry == nil) {
+                        Button(Marginalia.notesInVault ? "Open in Obsidian" : "Open Paper Note") { lib.openPaperNote(for: h) }
                     }
                     CollectionMenu(target: { entryFor(ids) })
                     if let c = scopeCollection, let e = entryFor(ids) {
@@ -435,9 +445,9 @@ struct ContentView: View {
         HStack(spacing: 0) {
             pdfPane
             if showMargin && viewer.path != nil && entryOnly == nil {
-                Divider()
+                ColumnHandle(width: $marginWidth, range: 220...600)
                 MarginColumn(viewer: viewer)
-                    .frame(width: 290)
+                    .frame(width: marginWidth)
             }
         }
     }
@@ -463,54 +473,69 @@ struct ContentView: View {
                     .background(Color(nsColor: .windowBackgroundColor))
                 }
             }
+            // a little space between the sidebar's edge and the PDF, so the PDF view doesn't
+            // fight the column-resize cursor
+            .padding(.leading, 6)
+            .background(Color(nsColor: .windowBackgroundColor))
             .navigationTitle(entryOnly?.shortCite ?? currentEntry?.shortCite ?? viewer.title)
             .toolbar {
                 ToolbarItemGroup {
+                    // match arrows: only while there are matches to step through
+                    if viewer.matchCount > 0 {
+                        Button { viewer.step(-1) } label: { Label("Previous Match", systemImage: "chevron.left") }
+                            .keyboardShortcut("g", modifiers: [.command, .shift])
+                            .help("Previous match (⇧⌘G)")
+                        Text("\(viewer.matchIndex + 1) of \(viewer.matchCount)")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        Button { viewer.step(1) } label: { Label("Next Match", systemImage: "chevron.right") }
+                            .keyboardShortcut("g", modifiers: .command)
+                            .help("Next match (⌘G)")
+                    }
                     Menu {
                         Button("Copy [@key] for Obsidian / Markdown") { cite(.pandoc) }
                         Button("Copy \\cite{key} for LaTeX / Overleaf") { cite(.latex) }
                         Button("Copy Key Only") { cite(.key) }
                     } label: {
-                        Label("Cite", systemImage: "quote.opening")
+                        Text("Cite")
                     } primaryAction: {
                         cite(.pandoc)
                     }
                         .disabled(viewer.path == nil && entryOnly == nil)
-                        .help("Copy citation (⇧⌘C for [@key], ⌥⇧⌘C for \\cite{key})")
-                    CollectionMenu(target: { currentEntry })
+                        .help("Copy a citation for this paper: click for [@key], or open the menu for \\cite{key} (⇧⌘C / ⌥⇧⌘C)")
+                    Button { openPaperNote() } label: { Text(Marginalia.notesInVault ? "Open in Obsidian" : "Open Note") }
                         .disabled(viewer.path == nil && entryOnly == nil)
-                        .help("Add this paper to a collection (a reading list for something you're writing)")
-                    if viewer.matchCount > 0 {
-                        Text("\(viewer.matchIndex + 1) of \(viewer.matchCount)")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    Button { viewer.step(-1) } label: { Label("Previous Match", systemImage: "chevron.up") }
-                        .disabled(viewer.matchCount == 0)
-                        .keyboardShortcut("g", modifiers: [.command, .shift])
-                        .help("Previous match (⇧⌘G)")
-                    Button { viewer.step(1) } label: { Label("Next Match", systemImage: "chevron.down") }
-                        .disabled(viewer.matchCount == 0)
-                        .keyboardShortcut("g", modifiers: .command)
-                        .help("Next match (⌘G)")
-                    Toggle(isOn: $showMargin) {
-                        Label("Notes", systemImage: "sidebar.right")
-                    }
+                        .help("Open this paper's note (your highlights and notes, as Markdown), creating it if needed (⌥⌘O)")
+                    Toggle(isOn: $showMargin) { Text("Notes") }
                         .toggleStyle(.button)
-                        .help("Show or hide your highlights and notes")
-                    Button { viewer.zoomToFit() } label: {
-                        Label("Zoom to Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+                        .help("Show or hide the notes column (your highlights and notes)")
+                    Menu {
+                        CollectionMenu(target: { currentEntry })
+                        Divider()
+                        Button("Zoom to Fit  ⌘0") { viewer.zoomToFit() }
+                            .disabled(viewer.path == nil)
+                        Button("Open in Preview") {
+                            if let p = viewer.path { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+                        }
+                            .disabled(viewer.path == nil)
+                        Button("Show in Finder") {
+                            if let p = viewer.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+                        }
+                            .disabled(viewer.path == nil)
+                    } label: {
+                        Label("More", systemImage: "ellipsis.circle")
                     }
-                        .disabled(viewer.path == nil)
-                        .keyboardShortcut("0", modifiers: .command)
-                        .help("Zoom to fit (⌘0)")
-                    Button {
-                        if let p = viewer.path { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
-                    } label: { Label("Open in Preview", systemImage: "arrow.up.forward.app") }
-                        .disabled(viewer.path == nil)
-                        .help("Open in your default PDF app")
+                        .disabled(viewer.path == nil && entryOnly == nil)
+                        .help("More: add to a collection, zoom to fit, open in Preview, show in Finder")
                 }
             }
+    }
+
+    /// Open (and if needed create) the Markdown note for what's on screen.
+    func openPaperNote() {
+        viewer.flushSave()
+        if let p = viewer.path { lib.openPaperNote(pdf: p) }
+        else if let e = entryOnly { lib.openPaperNote(entry: e) }
     }
 
     // MARK: actions
@@ -662,6 +687,41 @@ struct HitRow: View {
             }
         }
         .padding(.vertical, 3)
+    }
+}
+
+/// A draggable divider for the notes column: a 9-pt-wide grab area with a hairline in the middle, which
+/// keeps showing the resize cursor (the PDF view next to it would otherwise keep resetting the cursor).
+struct ColumnHandle: View {
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    @State private var startWidth: Double?
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .padding(.horizontal, 4)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active: NSCursor.resizeLeftRight.set()
+                case .ended: NSCursor.arrow.set()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { v in
+                        if startWidth == nil { startWidth = width }
+                        NSCursor.resizeLeftRight.set()
+                        // dragging left makes the notes column wider
+                        width = min(range.upperBound, max(range.lowerBound, (startWidth ?? width) - v.translation.width))
+                    }
+                    .onEnded { _ in startWidth = nil }
+            )
+            .help("Drag to resize the notes column")
     }
 }
 
@@ -1564,6 +1624,9 @@ final class Library: ObservableObject {
     @Published var citeTexRequest = 0
     /// bumped by Edit ▸ Highlight Selection (⌃⌘H)
     @Published var noteRequest = 0
+    /// bumped by View ▸ Zoom to Fit (⌘0) and File ▸ Open Paper Note (⌥⌘O)
+    @Published var zoomRequest = 0
+    @Published var openNoteRequest = 0
     /// a pdfsearch://open?file=…&page=… link to show (from an Obsidian note)
     @Published private(set) var linkRequest: LinkRequest?
     private var lastLinkTime = Date.distantPast
@@ -2126,6 +2189,48 @@ final class Library: ObservableObject {
             return FileManager.default.fileExists(atPath: p) ? p : nil
         }
         return nil
+    }
+
+    /// Open the paper's Markdown note (in Obsidian when the notes folder is in a vault), creating it first
+    /// if there isn't one yet, so there's somewhere to write before you've highlighted anything.
+    func openPaperNote(pdf path: String) {
+        var entry = bib.entry(forPath: path)
+        if let e = entry, !e.inLibrary { entry = ensureInLibrary(e)?.entry ?? e }
+        let note = Marginalia.notePath(pdfPath: path, entry: entry)
+        if !FileManager.default.fileExists(atPath: note) {
+            guard Paths.writeNotes else { showFlash("Paper notes are turned off in Settings (⌘,)"); return }
+            let doc = PDFDocument(url: URL(fileURLWithPath: path))
+            Marginalia.mirror(pdfPath: path, entry: entry, notes: doc.map(Marginalia.collect) ?? [],
+                              summary: doc.map(Marginalia.summary) ?? "", create: true)
+        }
+        if FileManager.default.fileExists(atPath: note) { Marginalia.openNote(note) }
+    }
+
+    /// The same for a book or other entry without a PDF.
+    func openPaperNote(entry e0: BibEntry) {
+        var e = e0
+        if !e.inLibrary { e = ensureInLibrary(e)?.entry ?? e }
+        let note = Marginalia.folder + "/" + Marginalia.noteFileName(key: e.key)
+        if !FileManager.default.fileExists(atPath: note) {
+            guard Paths.writeNotes else { showFlash("Paper notes are turned off in Settings (⌘,)"); return }
+            var t = "---\ncitekey: \(e.key)\ntitle: \(Marginalia.yaml(e.title))\n"
+            if !e.people.isEmpty { t += "authors: \(Marginalia.yaml(e.people.joined(separator: "; ")))\n" }
+            if !e.year.isEmpty { t += "year: \(e.year)\n" }
+            t += "---\n\n# \(e.title.isEmpty ? e.key : e.title)\n\n\(e.shortCite) · `[@\(e.key)]`\n\n## Notes\n\n"
+            do {
+                try FileManager.default.createDirectory(atPath: Marginalia.folder, withIntermediateDirectories: true)
+                try t.write(toFile: note, atomically: true, encoding: .utf8)
+            } catch {
+                showFlash("Couldn't write the note: \(error.localizedDescription)"); return
+            }
+        }
+        Marginalia.openNote(note)
+    }
+
+    func openPaperNote(for hit: Hit) {
+        if let p = hit.note?.notePath { Marginalia.openNote(p) }
+        else if !hit.path.isEmpty { openPaperNote(pdf: hit.path) }
+        else if let e = hit.entry { openPaperNote(entry: e) }
     }
 
     /// “quote” [@key, p. 12], ready to paste into a draft.
@@ -3164,14 +3269,21 @@ enum Marginalia {
         return folder + "/" + noteFileName(key: entry?.key ?? stem)
     }
 
-    /// Open a paper note: in Obsidian when it's inside an Obsidian vault, otherwise in the default Markdown app.
-    static func openNote(_ path: String) {
-        var dir = (path as NSString).deletingLastPathComponent
-        var inVault = false
+    /// true if this folder is inside an Obsidian vault (some folder above it holds `.obsidian`)
+    static func inVault(_ folder: String) -> Bool {
+        var dir = folder
         while dir.count > 1 {
-            if FileManager.default.fileExists(atPath: dir + "/.obsidian") { inVault = true; break }
+            if FileManager.default.fileExists(atPath: dir + "/.obsidian") { return true }
             dir = (dir as NSString).deletingLastPathComponent
         }
+        return false
+    }
+    /// are paper notes kept in an Obsidian vault? (labels say "Open in Obsidian" then)
+    static var notesInVault: Bool { inVault(folder) }
+
+    /// Open a paper note: in Obsidian when it's inside an Obsidian vault, otherwise in the default Markdown app.
+    static func openNote(_ path: String) {
+        let inVault = inVault((path as NSString).deletingLastPathComponent)
         if inVault, let enc = path.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
            let url = URL(string: "obsidian://open?path=" + enc),
            NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
@@ -3182,14 +3294,14 @@ enum Marginalia {
     }
 
     /// Create or update <notes folder>/@key.md. Only the marginalia block is rewritten.
-    static func mirror(pdfPath: String, entry: BibEntry?, notes: [MarginNote], summary: String) {
+    static func mirror(pdfPath: String, entry: BibEntry?, notes: [MarginNote], summary: String, create: Bool = false) {
         let stem = ((pdfPath as NSString).lastPathComponent as NSString).deletingPathExtension
         let key = entry?.key ?? stem
         let name = noteFileName(key: key)
         let fm = FileManager.default
         let url = URL(fileURLWithPath: folder).appendingPathComponent(name)
         let exists = fm.fileExists(atPath: url.path)
-        guard Paths.writeNotes, exists || !notes.isEmpty || !summary.isEmpty else { return }
+        guard Paths.writeNotes, exists || create || !notes.isEmpty || !summary.isEmpty else { return }
         do {
             try fm.createDirectory(atPath: folder, withIntermediateDirectories: true)
             let newBlock = block(pdfPath: pdfPath, entry: entry, notes: notes, summary: summary)
@@ -3217,11 +3329,6 @@ struct MarginColumn: View {
             // header: title + open the paper note
             HStack(spacing: 6) {
                 Text("Highlights & Notes").font(.headline)
-                if let p = viewer.path, let md = Library.shared.paperNotePath(forPDF: p) {
-                    Button { Marginalia.openNote(md) } label: { Image(systemName: "arrow.up.forward.square") }
-                        .buttonStyle(.borderless)
-                        .help("Open this paper's Markdown note (in Obsidian, if you use it)")
-                }
                 Spacer()
             }
             .padding(.horizontal, 12)

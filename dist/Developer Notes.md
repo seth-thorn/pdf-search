@@ -62,8 +62,11 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
 2. **Main window**: `ContentView`: `NavigationSplitView`.
    - Sidebar: `scopeBar` (Search in picker + ••• menu), results `List` of `HitRow`s, `statusBar`.
    - Detail: optional `findBar` + `pdfArea` (the PDF view with overlays for "Select a PDF" /
-     "file moved"), plus a toolbar with: Cite, Add to Collection, match counter, previous/next,
-     Notes (show/hide the notes column), Zoom to Fit, Open in Preview.
+     "file moved"), plus a toolbar with: ‹ match counter › (only while there are matches), Cite (text menu),
+     Open in Obsidian (`openPaperNote`, creates the note if needed), Notes (column toggle) and ••• (Add to
+     Collection, Zoom to Fit, Open in Preview, Show in Finder). The notes column is resized with `ColumnHandle`
+     (width in `@AppStorage("marginWidth")`); the PDF pane has 6 pt leading padding so PDFView doesn't fight the
+     sidebar divider's resize cursor.
    - Find state: `showFind`, `findText`, `findFocused`. `activeTerms` = find text when the bar has
      text, else the main search terms. `.task(id: findText)` debounces find typing (150 ms).
    - Drag-and-drop: `.onDrop(of: [.fileURL])` on the whole window.
