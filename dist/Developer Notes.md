@@ -161,7 +161,13 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
     `focusNoteID`). Right-click: *Copy Quote with Citation* (`“…” [@key, p. N]`), *Open Paper Note*
     (`Marginalia.openNote`: `obsidian://open?path=` when the file is inside a folder containing
     `.obsidian`, else the default app).
-12. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+12. **Result pictures**: `Thumb` (36×48 pt, at the left of each `HitRow`) asks `Thumbnails.shared`, which
+    renders page 1 with `PDFPage.thumbnail` onto white (160 px long side, JPEG) on a 3-wide `OperationQueue`
+    and caches it in memory (`NSCache`) and in `~/Library/Caches/PDF Search/Thumbnails` (key = path + mtime +
+    size, FNV-1a file names). Entries without a PDF get an Open Library cover by ISBN
+    (`covers.openlibrary.org/b/isbn/<isbn>-M.jpg?default=false`; a 404 is remembered, being offline isn't)
+    or a symbol.
+13. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 

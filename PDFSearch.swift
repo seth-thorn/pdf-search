@@ -578,7 +578,24 @@ struct ContentView: View {
 
 struct HitRow: View {
     let hit: Hit
+    /// a picture for entries without a PDF
+    private var symbol: String {
+        if !hit.path.isEmpty { return "doc" }
+        switch hit.entry?.type ?? "" {
+        case "book": return "book.closed"
+        case "incollection", "inbook": return "book"
+        default: return "doc.text"
+        }
+    }
     var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Thumb(path: hit.path, isbn: hit.path.isEmpty ? hit.entry.flatMap { Thumbnails.isbn($0.fields["isbn"]) } : nil,
+                  symbol: symbol)
+                .padding(.top, 2)
+            details
+        }
+    }
+    var details: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline) {
                 Text(hit.displayTitle).font(.headline).lineLimit(2)
@@ -635,6 +652,178 @@ struct HitRow: View {
             }
         }
         .padding(.vertical, 3)
+    }
+}
+
+/// The little picture at the left of a result: page 1 of the PDF (a book's cover, a paper's first page),
+/// a book's cover from Open Library for entries without a PDF, or a symbol.
+struct Thumb: View {
+    let path: String
+    let isbn: String?
+    let symbol: String
+    @State private var image: NSImage?
+    @State private var loadedKey = ""
+
+    var body: some View {
+        ZStack {
+            if let img = image {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .background(Color.white)
+                    .overlay(Rectangle().stroke(Color.secondary.opacity(0.35), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+            } else {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.secondary.opacity(0.08))
+                    .overlay(Image(systemName: symbol).foregroundStyle(.tertiary))
+            }
+        }
+        .frame(width: 36, height: 48)
+        .onAppear { load() }
+        .onChange(of: path) { _ in load() }
+        .onChange(of: isbn) { _ in load() }
+    }
+
+    private func load() {
+        let key = path + "|" + (isbn ?? "")
+        guard key != loadedKey else { return }
+        loadedKey = key
+        image = nil
+        Thumbnails.shared.image(pdf: path.isEmpty ? nil : path, isbn: isbn) { img in
+            if loadedKey == key { image = img }
+        }
+    }
+}
+
+/// Makes and caches the result pictures (~/Library/Caches/PDF Search/Thumbnails). A PDF's picture is
+/// remade when the file changes; covers that Open Library doesn't have are remembered as missing.
+final class Thumbnails {
+    static let shared = Thumbnails()
+    private let memory = NSCache<NSString, NSImage>()
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 3
+        q.qualityOfService = .utility
+        return q
+    }()
+    private let dir: URL = {
+        let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PDF Search/Thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+    private var waiting: [String: [(NSImage?) -> Void]] = [:]   // main thread only
+
+    init() { memory.countLimit = 800 }
+
+    /// The first ISBN in a bibliography field ("978-0-262-01234-5; 0262…").
+    static func isbn(_ field: String?) -> String? {
+        guard let f = field else { return nil }
+        for token in f.split(whereSeparator: { $0 == "," || $0 == ";" || $0 == " " || $0 == "/" }) {
+            if let i = Lookup.isbn(in: String(token)) { return i }
+        }
+        return Lookup.isbn(in: f)
+    }
+
+    /// Calls back on the main thread with the picture, or nil.
+    func image(pdf path: String?, isbn: String?, done: @escaping (NSImage?) -> Void) {
+        let key: String
+        if let p = path {
+            let a = try? FileManager.default.attributesOfItem(atPath: p)
+            let m = (a?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let s = (a?[.size] as? NSNumber)?.intValue ?? 0
+            key = "pdf|\(p)|\(m)|\(s)"
+        } else if let i = isbn {
+            key = "isbn|\(i)"
+        } else {
+            done(nil)
+            return
+        }
+        if let img = memory.object(forKey: key as NSString) { done(img); return }
+        if waiting[key] != nil { waiting[key]?.append(done); return }
+        waiting[key] = [done]
+        let name = Thumbnails.hash(key)
+        let file = dir.appendingPathComponent(name + ".jpg")
+        let none = dir.appendingPathComponent(name + ".none")
+        queue.addOperation {
+            let fm = FileManager.default
+            var data: Data?
+            if let d = try? Data(contentsOf: file) {
+                data = d
+            } else if !fm.fileExists(atPath: none.path) {
+                if let p = path {
+                    data = autoreleasepool { Thumbnails.render(p) }
+                    if data == nil { fm.createFile(atPath: none.path, contents: nil) }
+                } else if let i = isbn {
+                    switch Thumbnails.cover(i) {
+                    case .found(let d): data = d
+                    case .missing: fm.createFile(atPath: none.path, contents: nil)
+                    case .offline: break          // try again another time
+                    }
+                }
+                if let d = data { try? d.write(to: file) }
+            }
+            let img = data.flatMap { NSImage(data: $0) }
+            DispatchQueue.main.async {
+                if let img = img { self.memory.setObject(img, forKey: key as NSString) }
+                let calls = self.waiting.removeValue(forKey: key) ?? []
+                for c in calls { c(img) }
+            }
+        }
+    }
+
+    /// FNV-1a, for cache file names
+    static func hash(_ s: String) -> String {
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in s.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
+        return String(h, radix: 16)
+    }
+
+    /// Page 1 as a small JPEG on white.
+    static func render(_ path: String) -> Data? {
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)), !doc.isLocked,
+              let page = doc.page(at: 0) else { return nil }
+        var box = page.bounds(for: .cropBox).size
+        if page.rotation % 180 != 0 { box = NSSize(width: box.height, height: box.width) }
+        guard box.width > 1, box.height > 1 else { return nil }
+        // 160 px on the long side: sharp at 36 × 48 pt on a Retina screen
+        let scale = 160 / max(box.width, box.height)
+        let w = max(1, Int((box.width * scale).rounded())), h = max(1, Int((box.height * scale).rounded()))
+        let thumb = page.thumbnail(of: NSSize(width: w, height: h), for: .cropBox)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        let r = NSRect(x: 0, y: 0, width: w, height: h)
+        NSColor.white.setFill()
+        r.fill()
+        thumb.draw(in: r)
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75])
+    }
+
+    enum Cover { case found(Data), missing, offline }
+
+    /// A book cover from Open Library (no picture → .missing; no connection → .offline).
+    static func cover(_ isbn: String) -> Cover {
+        guard let url = URL(string: "https://covers.openlibrary.org/b/isbn/\(isbn)-M.jpg?default=false") else { return .missing }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue(Lookup.userAgent, forHTTPHeaderField: "User-Agent")
+        let sem = DispatchSemaphore(value: 0)
+        var result = Cover.offline
+        URLSession.shared.dataTask(with: req) { d, r, _ in
+            if let h = r as? HTTPURLResponse {
+                if h.statusCode == 200, let d = d, d.count > 500, NSImage(data: d) != nil { result = .found(d) }
+                else if h.statusCode == 404 { result = .missing }
+            }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 20)
+        return result
     }
 }
 
@@ -2727,6 +2916,13 @@ enum SelfTest {
                                          ("essential", HighlightLevel.essential.nsColor), ("green", NSColor(srgbRed: 0.37, green: 0.7, blue: 0.21, alpha: 1)),
                                          ("orange", NSColor(srgbRed: 1, green: 0.55, blue: 0, alpha: 1)), ("grey", NSColor(srgbRed: 0.6, green: 0.6, blue: 0.6, alpha: 1))]
         print("SELFTEST yellow? " + cols.map { "\($0.0)=\(HighlightLevel.isYellow($0.1))" }.joined(separator: " ") + " (expect true true false false false false)")
+        print("SELFTEST thumbnails: isbn=\(Thumbnails.isbn("978-0-262-01234-5; 0262012340") ?? "-") none=\(Thumbnails.isbn("n/a") ?? "-") hash=\(Thumbnails.hash("pdf|/x.pdf|1|2"))")
+        // build.sh runs the self-test from the source folder, next to test-pdfs/
+        let pdf = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("test-pdfs")
+        if let first = (try? FileManager.default.contentsOfDirectory(atPath: pdf.path))?.first(where: { $0.hasSuffix(".pdf") }) {
+            let d = Thumbnails.render(pdf.appendingPathComponent(first).path)
+            print("SELFTEST thumbnail of \(first): \(d.map { "\($0.count) bytes, " + (NSImage(data: $0).map { "\(Int($0.size.width))×\(Int($0.size.height))" } ?? "unreadable") } ?? "FAILED")")
+        }
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)
