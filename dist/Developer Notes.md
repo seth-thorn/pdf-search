@@ -62,12 +62,14 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
 2. **Main window**: `ContentView`: `NavigationSplitView`.
    - Sidebar: `scopeBar` (Search in picker + ••• menu), results `List` of `HitRow`s, `statusBar`.
    - Detail: optional `findBar` + `pdfArea` (the PDF view with overlays for "Select a PDF" /
-     "file moved"), plus a toolbar with: match counter, previous/next, Highlighter toggle,
-     Highlight Color menu, Zoom to Fit, Open in Preview.
+     "file moved"), plus a toolbar with: Cite, Add to Collection, match counter, previous/next,
+     Notes (show/hide the notes column), Zoom to Fit, Open in Preview.
    - Find state: `showFind`, `findText`, `findFocused`. `activeTerms` = find text when the bar has
      text, else the main search terms. `.task(id: findText)` debounces find typing (150 ms).
    - Drag-and-drop: `.onDrop(of: [.fileURL])` on the whole window.
-3. **PDF viewer**: `HighlightColor` (enum of the 5 colours, 50% alpha) and
+3. **PDF viewer**: `HighlightLevel` (two kinds of highlight, 50% alpha: `.interesting` yellow, `.essential`
+   red-pink; `HighlightLevel.of(annotation)` reads the level from the colour: yellow hue → Interesting, any
+   other colour → Essential, sticky notes → none) and
    `HighlightingPDFView` (a `PDFView` subclass whose `menu(for:)` adds "Highlight" / "Remove
    Highlight"). `PDFKitView` wraps the single long-lived view owned by `Viewer`.
    - `Viewer.show(path:terms:page:wholeWords:)` first saves pending highlights (`flushSave`),
@@ -81,8 +83,9 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
      `userScale`. Window resizes re-fit only while `userScale == nil`. `zoomToFit()` clears it.
      (Pinch-zoom used to snap back because `autoScales = true` re-fits on every layout.)
    - **Highlights**: `addHighlight(sel)` makes one `PDFAnnotation(.highlight)` per page with one
-     quad per line (`selectionsByLine`), points relative to the annotation's bounds, colour from
-     `highlightColor`, author = macOS full name. The highlighter mode uses an `NSEvent` local
+     quad per line (`selectionsByLine`), points relative to the annotation's bounds, Interesting
+     (yellow), author = macOS full name. `setLevel(_:_:)` recolours one (the card's **Essential**
+     checkbox, or right-click → Mark as …). The highlighter mode uses an `NSEvent` local
      monitor for `.leftMouseUp` inside the PDF view. `removeHighlight` removes the annotation.
      Both call `markUnsaved()` → `flushSave()` after 0.8 s, which writes the document to a hidden
      temp file `.<name>.pdfsearch-saving` in the same folder and swaps it in with
@@ -122,7 +125,8 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    Clicking a highlight in the PDF (a local `leftMouseUp` monitor) focuses its card. After each save, `Library.afterSave()`
    re-indexes the file (notes are appended to their page's text, so they're searchable) and
    rewrites only the block between `<!-- marginalia:start -->` and `<!-- marginalia:end -->` in the
-   note; everything outside it is the user's. Links in notes are `pdfsearch://open?file=…&page=N`,
+   note (`## Summary`, then `## Essential` and `## Interesting`, or just `## Marginalia` when nothing is
+   Essential; each in page order); everything outside it is the user's. Links in notes are `pdfsearch://open?file=…&page=N`,
    handled by `Library.handle(_:)` (from `.onOpenURL` and the app delegate) → `linkRequest`.
 7. **Collections**: `Collection` (name, path, ordered keys parsed from every `@key` in the note) and
    `Library.reloadCollections()` (on launch and whenever the app comes to the front). `addToCollection`
@@ -175,7 +179,8 @@ notefiles(id INTEGER PRIMARY KEY, path TEXT UNIQUE, mtime REAL, pdf TEXT, key TE
       -- paper notes whose own text is indexed; pdf = the note's `pdf:` line as written
 ```
 
-`notes` rowids: `fileID * 10000 + n` for a PDF's annotations (deleted with the file, as a range),
+Note kinds in `notes`: `e` Essential highlight, `h` other highlight or note, `s` summary, `o` paper-note paragraph
+(My Notes lists `e` first). `notes` rowids: `fileID * 10000 + n` for a PDF's annotations (deleted with the file, as a range),
 `-(notefileID * 10000 + n)` for paper-note paragraphs. `PRAGMA user_version` is the index version:
 on upgrading to 2, `setup()` zeroes every `files.mtime` so the next rescan re-reads all PDFs and fills `notes`.
 

@@ -174,7 +174,7 @@ struct ContentView: View {
         .onChange(of: lib.citeRequest) { _ in cite(.pandoc) }
         .onChange(of: lib.noteRequest) { _ in
             showMargin = true
-            viewer.highlightAndComment()
+            viewer.highlightAndComment(.interesting)
         }
         .onChange(of: viewer.focusNoteID) { id in if id != nil { showMargin = true } }
         .onChange(of: viewer.spotlightNoteID) { id in if id != nil { showMargin = true } }
@@ -596,7 +596,10 @@ struct HitRow: View {
             }
             if let n = hit.note {
                 // one of your notes (Search in ▸ My Notes)
-                if n.kind == "s" {
+                if n.kind == "e" {
+                    Label("Essential", systemImage: "star.fill").font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(nsColor: HighlightLevel.essential.nsColor.withAlphaComponent(1)))
+                } else if n.kind == "s" {
                     Text("About this paper").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 } else if n.kind == "o" {
                     Text("In your paper note").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -605,7 +608,9 @@ struct HitRow: View {
                     Text(q).font(.callout).foregroundStyle(.secondary).lineLimit(4)
                         .padding(.leading, 9)
                         .overlay(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 1).fill(Color.yellow.opacity(0.8)).frame(width: 3)
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(Color(nsColor: (n.kind == "e" ? HighlightLevel.essential : .interesting).nsColor.withAlphaComponent(0.9)))
+                                .frame(width: 3)
                         }
                 }
                 if let c = n.comment {
@@ -695,38 +700,51 @@ struct PDFKitView: NSViewRepresentable {
     func updateNSView(_ nsView: PDFView, context: Context) {}
 }
 
-enum HighlightColor: String, CaseIterable, Identifiable {
-    case yellow, green, blue, pink, purple
+/// Two kinds of highlight. The level *is* the colour in the PDF, so other PDF apps show it too:
+/// yellow = Interesting (the everyday kind), any other colour = Essential (the few passages that matter most).
+enum HighlightLevel: String, CaseIterable, Identifiable {
+    case essential, interesting
     var id: String { rawValue }
-    var name: String { rawValue.capitalized }
+    var name: String { self == .essential ? "Essential" : "Interesting" }
     var nsColor: NSColor {
         switch self {
-        case .yellow: return NSColor(srgbRed: 1.00, green: 0.86, blue: 0.10, alpha: 0.5)
-        case .green:  return NSColor(srgbRed: 0.45, green: 0.86, blue: 0.35, alpha: 0.5)
-        case .blue:   return NSColor(srgbRed: 0.40, green: 0.70, blue: 1.00, alpha: 0.5)
-        case .pink:   return NSColor(srgbRed: 1.00, green: 0.45, blue: 0.65, alpha: 0.5)
-        case .purple: return NSColor(srgbRed: 0.70, green: 0.50, blue: 1.00, alpha: 0.5)
+        case .essential:   return NSColor(srgbRed: 0.96, green: 0.33, blue: 0.45, alpha: 0.5)
+        case .interesting: return NSColor(srgbRed: 1.00, green: 0.86, blue: 0.10, alpha: 0.5)
         }
+    }
+    /// Highlights, underlines etc.: yellow → Interesting, other colours → Essential. Notes (sticky notes) have no level.
+    static func of(_ a: PDFAnnotation) -> HighlightLevel? {
+        let t = (a.type ?? "").replacingOccurrences(of: "/", with: "")
+        guard ["Highlight", "Underline", "StrikeOut", "Squiggly"].contains(t) else { return nil }
+        return isYellow(a.color) ? .interesting : .essential
+    }
+    static func isYellow(_ c: NSColor) -> Bool {
+        guard let rgb = c.usingColorSpace(.sRGB) ?? c.usingColorSpace(.deviceRGB) else { return true }
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        rgb.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        // no colour at all counts as the everyday kind; grey or any real hue outside yellow is Essential
+        if rgb.redComponent == 0 && rgb.greenComponent == 0 && rgb.blueComponent == 0 && a == 0 { return true }
+        return s >= 0.15 && h >= 0.11 && h < 0.20
     }
 }
 
 /// PDFView with "Highlight" / "Remove Highlight" in its right-click menu.
 final class HighlightingPDFView: PDFView {
-    var onHighlight: ((PDFSelection) -> Void)?
-    var onHighlightAndNote: ((PDFSelection) -> Void)?
+    var onHighlightAndNote: ((PDFSelection, HighlightLevel) -> Void)?
     var onRemove: ((PDFAnnotation) -> Void)?
     var onEditNote: ((PDFAnnotation) -> Void)?
+    var onSetLevel: ((PDFAnnotation, HighlightLevel) -> Void)?
 
     static func isHighlight(_ a: PDFAnnotation) -> Bool {
         (a.type ?? "").replacingOccurrences(of: "/", with: "") == "Highlight"
     }
 
-    /// H (no modifier keys) highlights the selected text.
+    /// H highlights the selected text (as Interesting; tick Essential on its card to change that).
     override func keyDown(with event: NSEvent) {
         let mods = event.modifierFlags.intersection([.command, .control, .option])
         if mods.isEmpty, event.charactersIgnoringModifiers?.lowercased() == "h",
            let sel = currentSelection, let t = sel.string, t.contains(where: { !$0.isWhitespace }) {
-            onHighlightAndNote?(sel)
+            onHighlightAndNote?(sel, .interesting)
             return
         }
         super.keyDown(with: event)
@@ -736,9 +754,9 @@ final class HighlightingPDFView: PDFView {
         let menu = super.menu(for: event) ?? NSMenu()
         var extra: [NSMenuItem] = []
         if let sel = currentSelection, let text = sel.string, text.contains(where: { !$0.isWhitespace }) {
-            let note = NSMenuItem(title: "Highlight", action: #selector(noteSelectionItem(_:)), keyEquivalent: "")
-            note.target = self
-            extra.append(note)
+            let item = NSMenuItem(title: "Highlight", action: #selector(noteSelectionItem(_:)), keyEquivalent: "")
+            item.target = self
+            extra.append(item)
         }
         let pt = convert(event.locationInWindow, from: nil)
         if let page = page(for: pt, nearest: false) {
@@ -749,6 +767,13 @@ final class HighlightingPDFView: PDFView {
                 edit.target = self
                 edit.representedObject = ann
                 extra.append(edit)
+                if let level = HighlightLevel.of(ann) {
+                    let other: HighlightLevel = level == .essential ? .interesting : .essential
+                    let mark = NSMenuItem(title: "Mark as \(other.name)", action: #selector(setLevelItem(_:)), keyEquivalent: "")
+                    mark.target = self
+                    mark.representedObject = [ann, other.rawValue] as [Any]
+                    extra.append(mark)
+                }
                 let item = NSMenuItem(title: "Remove Highlight", action: #selector(removeHighlightItem(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = ann
@@ -762,14 +787,18 @@ final class HighlightingPDFView: PDFView {
         return menu
     }
 
-    @objc private func highlightSelectionItem(_ sender: NSMenuItem) {
-        if let sel = currentSelection { onHighlight?(sel) }
-    }
     @objc private func removeHighlightItem(_ sender: NSMenuItem) {
         if let ann = sender.representedObject as? PDFAnnotation { onRemove?(ann) }
     }
     @objc private func noteSelectionItem(_ sender: NSMenuItem) {
-        if let sel = currentSelection { onHighlightAndNote?(sel) }
+        let level = HighlightLevel(rawValue: sender.representedObject as? String ?? "") ?? .interesting
+        if let sel = currentSelection { onHighlightAndNote?(sel, level) }
+    }
+    @objc private func setLevelItem(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [Any], pair.count == 2,
+              let ann = pair[0] as? PDFAnnotation, let raw = pair[1] as? String,
+              let level = HighlightLevel(rawValue: raw) else { return }
+        onSetLevel?(ann, level)
     }
     @objc private func editNoteItem(_ sender: NSMenuItem) {
         if let ann = sender.representedObject as? PDFAnnotation { onEditNote?(ann) }
@@ -798,10 +827,6 @@ final class Viewer: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var mouseMonitor: Any?
 
-    @Published var highlightColor: HighlightColor =
-        HighlightColor(rawValue: UserDefaults.standard.string(forKey: "highlightColor") ?? "") ?? .yellow {
-        didSet { UserDefaults.standard.set(highlightColor.rawValue, forKey: "highlightColor") }
-    }
     private var unsaved = false
     private var saveWork: DispatchWorkItem?
     /// highlights / notes in the open PDF, in page order (shown in the margin column)
@@ -833,8 +858,8 @@ final class Viewer: ObservableObject {
         observers.append(nc.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
             self?.flushSave()
         })
-        pdfView.onHighlight = { [weak self] sel in self?.addHighlight(sel) }
-        pdfView.onHighlightAndNote = { [weak self] _ in self?.highlightAndComment() }
+        pdfView.onHighlightAndNote = { [weak self] _, level in self?.highlightAndComment(level) }
+        pdfView.onSetLevel = { [weak self] ann, level in self?.setLevel(ann, level) }
         pdfView.onRemove = { [weak self] ann in self?.removeHighlight(ann) }
         pdfView.onEditNote = { [weak self] ann in
             self?.refreshNotes()
@@ -866,12 +891,12 @@ final class Viewer: ObservableObject {
     // MARK: highlights (saved into the PDF file, like Preview)
 
     /// H, the Highlight button or ⌃⌘H: highlight the selected text and put the cursor in its note.
-    func highlightAndComment() {
+    func highlightAndComment(_ level: HighlightLevel = .interesting) {
         guard let sel = pdfView.currentSelection, let text = sel.string, text.contains(where: { !$0.isWhitespace }) else {
             Library.shared.showFlash("Select some text in the PDF first, then press H")
             return
         }
-        let made = addHighlight(sel)
+        let made = addHighlight(sel, level: level)
         hasSelection = false
         if let a = made.first { focusNoteID = ObjectIdentifier(a) }
     }
@@ -915,8 +940,13 @@ final class Viewer: ObservableObject {
         markUnsaved(after: 1.5)
     }
 
-    func setHighlightColor(_ c: HighlightColor) {
-        highlightColor = c
+    /// Make a highlight Essential or Interesting (changes its colour in the PDF).
+    func setLevel(_ ann: PDFAnnotation, _ level: HighlightLevel) {
+        guard HighlightLevel.of(ann) != nil, HighlightLevel.of(ann) != level else { return }
+        ann.color = level.nsColor
+        ann.modificationDate = Date()
+        markUnsaved()
+        refreshNotes()
     }
 
     func reveal(_ note: MarginNote) {
@@ -929,7 +959,7 @@ final class Viewer: ObservableObject {
     }
 
     @discardableResult
-    func addHighlight(_ sel: PDFSelection) -> [PDFAnnotation] {
+    func addHighlight(_ sel: PDFSelection, level: HighlightLevel = .interesting) -> [PDFAnnotation] {
         guard pdfView.document != nil else { return [] }
         var made: [PDFAnnotation] = []
         // one annotation per page, one quad per line (like Preview)
@@ -947,7 +977,7 @@ final class Viewer: ObservableObject {
             guard let rects = byPage[page], let first = rects.first else { continue }
             let box = rects.dropFirst().reduce(first) { $0.union($1) }
             let ann = PDFAnnotation(bounds: box, forType: .highlight, withProperties: nil)
-            ann.color = highlightColor.nsColor
+            ann.color = level.nsColor
             ann.quadrilateralPoints = rects.flatMap { r -> [NSValue] in
                 let x0 = r.minX - box.minX, x1 = r.maxX - box.minX
                 let y0 = r.minY - box.minY, y1 = r.maxY - box.minY
@@ -1201,7 +1231,7 @@ struct Hit: Identifiable {
 
 /// One of your notes as a search result.
 struct NoteInfo {
-    let kind: String            // "h" highlight/note in the PDF, "s" About this paper, "o" your writing in the paper's Markdown note
+    let kind: String            // "e" Essential / "h" other highlight or note in the PDF, "s" About this paper, "o" your writing in the paper's Markdown note
     let quote: AttributedString?
     let comment: AttributedString?
     let quoteText: String
@@ -1221,7 +1251,7 @@ struct NoteTarget {
 
 /// A note as stored in the search index (see DB.store).
 struct IndexedNote {
-    let kind: String            // "h" or "s"
+    let kind: String            // "e" Essential highlight, "h" other highlight or note, "s" summary
     let page: Int
     let label: String
     let quote: String
@@ -2053,7 +2083,8 @@ final class Library: ObservableObject {
             let s = Marginalia.summary(doc)
             if !s.isEmpty { notes.append(IndexedNote(kind: "s", page: 0, label: "", quote: "", comment: s)) }
             for n in Marginalia.collect(doc) where !(n.quote.isEmpty && n.comment.isEmpty) {
-                notes.append(IndexedNote(kind: "h", page: n.pageIndex, label: n.pageLabel, quote: n.quote, comment: n.comment))
+                notes.append(IndexedNote(kind: n.level == .essential ? "e" : "h", page: n.pageIndex, label: n.pageLabel,
+                                         quote: n.quote, comment: n.comment))
             }
         }
         return (pages, notes)
@@ -2202,8 +2233,9 @@ final class Library: ObservableObject {
         case "s": label = "About this paper: "; body = r.commentHL
         case "o": label = "Your paper note: "; body = r.commentHL
         default:
-            if r.quote.isEmpty || r.commentHL.contains("\u{2}") { label = "Your note: "; body = r.commentHL }
-            else { label = "You highlighted: "; body = "“" + r.quoteHL + "”" }
+            let star = r.kind == "e" ? "★ Essential · " : ""
+            if r.quote.isEmpty || r.commentHL.contains("\u{2}") { label = star + "Your note: "; body = r.commentHL }
+            else { label = star.isEmpty ? "You highlighted: " : star; body = "“" + r.quoteHL + "”" }
         }
         var a = AttributedString(label)
         a.font = Font.callout.weight(.semibold)
@@ -2213,14 +2245,18 @@ final class Library: ObservableObject {
 
     /// Search in ▸ My Notes, with words typed: one result per note.
     private func noteHits(_ fts: String, bib: BibIndex, indexed: Set<String>) -> [Hit] {
-        reader.searchNotes(fts).compactMap { (r: NoteRow) -> Hit? in
+        // Essential passages first, otherwise best match first
+        let rows = reader.searchNotes(fts).enumerated()
+            .sorted { a, b in (a.element.kind == "e") != (b.element.kind == "e") ? a.element.kind == "e" : a.offset < b.offset }
+            .map { $0.element }
+        return rows.compactMap { (r: NoteRow) -> Hit? in
             let (path, entry) = resolve(r, bib: bib, indexed: indexed)
             if path.isEmpty && entry == nil { return nil }
             let badge: String
             switch r.kind {
             case "s": badge = "about this paper"
             case "o": badge = "paper note"
-            default: badge = "p. " + (r.label.isEmpty ? String(r.page + 1) : r.label)
+            default: badge = (r.kind == "e" ? "★ " : "") + "p. " + (r.label.isEmpty ? String(r.page + 1) : r.label)
             }
             var h = Hit(id: r.rowid, path: path, page: r.kind == "o" ? 0 : r.page + 1, badge: badge, snippet: nil, entry: entry)
             h.note = Library.info(r)
@@ -2280,7 +2316,7 @@ final class Library: ObservableObject {
         var at: [String: Int] = [:]
         for (i, h) in hits.enumerated() where !h.path.isEmpty { at[BibIndex.norm(h.path)] = i }
         for k in order {
-            guard let rs = groups[k], let first = rs.first, let w = where_[k] else { continue }
+            guard let rs = groups[k], let w = where_[k], let first = rs.first(where: { $0.kind == "e" }) ?? rs.first else { continue }
             if let i = at[k] {
                 hits[i].noteSnippet = Library.snippetLine(first)
                 hits[i].noteCount = rs.count
@@ -2687,6 +2723,10 @@ enum SelfTest {
         print("SELFTEST own notes: pdf=\(own.pdf) key=\(own.key) paragraphs=\(own.paragraphs) (expect 2)")
         let plain = OwnNotes.parse("# My own note\n\nOnly text.\n", fileName: "@jones2020x.md")
         print("SELFTEST own notes (no frontmatter): key=\(plain.key) paragraphs=\(plain.paragraphs)")
+        let cols: [(String, NSColor)] = [("ours", HighlightLevel.interesting.nsColor), ("zotero", NSColor(srgbRed: 1, green: 0.831, blue: 0, alpha: 1)),
+                                         ("essential", HighlightLevel.essential.nsColor), ("green", NSColor(srgbRed: 0.37, green: 0.7, blue: 0.21, alpha: 1)),
+                                         ("orange", NSColor(srgbRed: 1, green: 0.55, blue: 0, alpha: 1)), ("grey", NSColor(srgbRed: 0.6, green: 0.6, blue: 0.6, alpha: 1))]
+        print("SELFTEST yellow? " + cols.map { "\($0.0)=\(HighlightLevel.isYellow($0.1))" }.joined(separator: " ") + " (expect true true false false false false)")
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)
@@ -2711,6 +2751,8 @@ struct MarginNote: Identifiable {
     let quote: String
     let comment: String
     let color: NSColor
+    /// Essential / Interesting for highlights; nil for sticky notes
+    var level: HighlightLevel? { HighlightLevel.of(annotation) }
     var id: ObjectIdentifier { ObjectIdentifier(annotation) }
 }
 
@@ -2824,17 +2866,24 @@ enum Marginalia {
         var b = startMarker + "\n"
         b += "*This section is updated automatically from the PDF (its summary and highlights). Write them in PDF Search; write your own notes below this section — they're never touched.*\n\n"
         if !summary.isEmpty { b += "## Summary\n\n" + summary + "\n\n" }
-        b += "## Marginalia\n\n"
-        if notes.isEmpty { b += "*(no highlights yet)*\n\n" }
-        for n in notes {
+        func entryText(_ n: MarginNote) -> String {
             let pageLink = "[p. \(n.pageLabel)](\(link(path: pdfPath, page: n.pageIndex + 1)))"
             let cite = entry.map { " [@\($0.key), p. \(n.pageLabel)]" } ?? ""
-            if !n.quote.isEmpty {
-                b += "> “\(n.quote)” (\(pageLink))\(cite)\n\n"
-            } else {
-                b += "**\(pageLink)**\(cite)\n\n"
-            }
-            if !n.comment.isEmpty { b += n.comment + "\n\n" }
+            var t = n.quote.isEmpty ? "**\(pageLink)**\(cite)\n\n" : "> “\(n.quote)” (\(pageLink))\(cite)\n\n"
+            if !n.comment.isEmpty { t += n.comment + "\n\n" }
+            return t
+        }
+        // Essential passages first, then everything else, each in page order
+        let essential = notes.filter { $0.level == .essential }
+        let rest = notes.filter { $0.level != .essential }
+        if !essential.isEmpty {
+            b += "## Essential\n\n"
+            for n in essential { b += entryText(n) }
+        }
+        if !rest.isEmpty || notes.isEmpty {
+            b += essential.isEmpty ? "## Marginalia\n\n" : "## Interesting\n\n"
+            if notes.isEmpty { b += "*(no highlights yet)*\n\n" }
+            for n in rest { b += entryText(n) }
         }
         return b + endMarker
     }
@@ -2900,7 +2949,7 @@ struct MarginColumn: View {
     @ObservedObject var viewer: Viewer
     var body: some View {
         VStack(spacing: 0) {
-            // header: title + highlight colour
+            // header: title + open the paper note
             HStack(spacing: 6) {
                 Text("Highlights & Notes").font(.headline)
                 if let p = viewer.path, let md = Library.shared.paperNotePath(forPDF: p) {
@@ -2909,17 +2958,27 @@ struct MarginColumn: View {
                         .help("Open this paper's Markdown note (in Obsidian, if you use it)")
                 }
                 Spacer()
-                ForEach(HighlightColor.allCases) { c in
-                    Circle()
-                        .fill(Color(nsColor: c.nsColor.withAlphaComponent(1)))
-                        .frame(width: 14, height: 14)
-                        .overlay(Circle().stroke(Color.primary.opacity(viewer.highlightColor == c ? 0.8 : 0), lineWidth: 2).padding(-3))
-                        .onTapGesture { viewer.setHighlightColor(c) }
-                        .help("Highlight in \(c.name.lowercased())")
-                }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.top, 9)
+            .padding(.bottom, 4)
+
+            // legend: the two kinds of highlight
+            HStack(spacing: 14) {
+                ForEach([HighlightLevel.essential, .interesting]) { level in
+                    HStack(spacing: 5) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color(nsColor: level.nsColor.withAlphaComponent(0.9)))
+                            .frame(width: 14, height: 10)
+                        Text(level.name).font(.caption.weight(.medium))
+                    }
+                    .help(level == .essential ? "Essential: the few passages that matter most. Tick Essential on a card."
+                                              : "Interesting: worth remembering. Every new highlight starts here.")
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
 
             // the one action, shown whenever text is selected
             if viewer.hasSelection {
@@ -2981,6 +3040,7 @@ struct MarginColumn: View {
             Divider()
             VStack(alignment: .leading, spacing: 4) {
                 Label("Select text, then press H to highlight it", systemImage: "highlighter")
+                Label("Tick Essential for the passages that matter most", systemImage: "checkmark.square")
                 Label("Type a note under a highlight. It saves itself", systemImage: "square.and.pencil")
                 Label("Click a page number to go to the passage", systemImage: "arrow.turn.down.right")
                 Label("Trash button removes a highlight and its note", systemImage: "trash")
@@ -3058,9 +3118,14 @@ struct NoteCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color(nsColor: note.color.withAlphaComponent(1)))
-                    .frame(width: 12, height: 12)
+                if let level = note.level {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(nsColor: level.nsColor.withAlphaComponent(0.9)))
+                        .frame(width: 12, height: 12)
+                        .help(level.name)
+                } else {
+                    Image(systemName: "note.text").foregroundStyle(.secondary)
+                }
                 Button("Page \(note.pageLabel)") { viewer.reveal(note) }
                     .buttonStyle(.link)
                     .help("Go to this passage")
@@ -3096,6 +3161,16 @@ struct NoteCard: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 6)
                 .stroke(focused ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: focused ? 2 : 1))
+            if note.level != nil {
+                // Essential or not: changes the highlight's colour (red-pink / yellow)
+                Toggle(isOn: Binding(
+                    get: { note.level == .essential },
+                    set: { viewer.setLevel(note.annotation, $0 ? .essential : .interesting) })) {
+                    Text("Essential").font(.callout.weight(note.level == .essential ? .semibold : .regular))
+                }
+                .toggleStyle(.checkbox)
+                .help("Tick for the passages that matter most (red-pink). Unticked = Interesting (yellow).")
+            }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
