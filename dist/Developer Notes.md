@@ -171,7 +171,13 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
     `max(files.edited, edits.time)`: `files.edited` is the newest annotation `modificationDate` found when indexing
     (so edits made on another Mac count after a rescan), and `edits(path, time)` is written by `Library.afterSave`
     on every save (so removing a highlight counts too). Opening a PDF doesn't count.
-14. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
+14. **Highlight outline**: clicking a `NoteCard` calls `Viewer.reveal`, which scrolls only if the highlight is off screen,
+    sets `spotlightNoteID` (card outline) and calls `flash(_:)`: a thin dark border view added to `pdfView.documentView`
+    that fades in (0.15 s), holds and fades out (0.3 s). Nothing is written to the PDF.
+15. **#Tags**: `Marginalia.tags(in:)` / `hasTag` follow Obsidian's tag rules. Note cards show `TagChip`s (`FlowLayout`);
+    a chip runs `Library.showTag` (My Notes, query `#tag`). `noteHits(…, tags:)` keeps only notes really carrying the tag
+    (FTS drops the `#`). Obsidian indexes the same tags in the mirrored paper notes, with no extra files.
+16. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
 ### Index schema
 

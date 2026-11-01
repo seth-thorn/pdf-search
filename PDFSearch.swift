@@ -4,6 +4,7 @@
 import SwiftUI
 import AppKit
 import PDFKit
+import QuartzCore
 import SQLite3
 import UniformTypeIdentifiers
 
@@ -692,7 +693,7 @@ struct ReadmeCard: View {
         ("Read",
          "Click a result. Your search words are marked in orange; ⌘G jumps to the next one."),
         ("Highlight",
-         "Select a passage and press H, then type your thought in the box on the right. Tick Essential for the few passages that matter most."),
+         "Select a passage and press H, then type your thought in the box on the right. Tick Essential for the few passages that matter most. Add #tags (e.g. #improvisation) to group ideas across papers; click a tag to see them all, here or in Obsidian."),
         ("Your notes stay with the PDF",
          "Highlights and notes are saved inside the PDF itself, and copied automatically into the paper’s note in Obsidian."),
         ("Think and write in Obsidian",
@@ -724,6 +725,50 @@ struct ReadmeCard: View {
         }
         .padding(22)
         .frame(width: 520)
+    }
+}
+
+/// A #tag under a note: click to see every note with that tag (in My Notes). The same tag works in Obsidian.
+struct TagChip: View {
+    let tag: String
+    var body: some View {
+        Button { Library.shared.showTag(tag) } label: {
+            Text("#" + tag)
+                .font(.caption)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                .foregroundStyle(Color.accentColor)
+        }
+        .buttonStyle(.plain)
+        .help("Show every note tagged #\(tag)")
+    }
+}
+
+/// Lays its children out left to right, wrapping onto new lines (for tag chips).
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxW = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0, width: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0 && x + s.width > maxW { x = 0; y += rowH + spacing; rowH = 0 }
+            x += s.width + spacing
+            rowH = max(rowH, s.height)
+            width = max(width, x - spacing)
+        }
+        return CGSize(width: width, height: y + rowH)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowH: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + s.width > bounds.maxX { x = bounds.minX; y += rowH + spacing; rowH = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing
+            rowH = max(rowH, s.height)
+        }
     }
 }
 
@@ -1161,6 +1206,7 @@ final class Viewer: ObservableObject {
                 guard !self.hasSelection,
                       let ann = page.annotations.last(where: { Marginalia.isMarkup($0) && $0.bounds.contains(pagePoint) })
                 else { return }
+                self.spotlightNoteID = ObjectIdentifier(ann)
                 self.focusNoteID = ObjectIdentifier(ann)
             }
             return event
@@ -1228,9 +1274,48 @@ final class Viewer: ObservableObject {
         refreshNotes()
     }
 
+    /// Scroll to a highlight, outline its card, and briefly outline it in the PDF.
     func reveal(_ note: MarginNote) {
         guard let page = note.annotation.page else { return }
-        pdfView.go(to: note.annotation.bounds.insetBy(dx: -40, dy: -80), on: page)
+        // scroll only if the highlight isn't already fully on screen (so clicking into a note box doesn't jump)
+        let onScreen = pdfView.convert(note.annotation.bounds, from: page)
+        if !pdfView.bounds.contains(onScreen) || pdfView.currentPage == nil {
+            pdfView.go(to: note.annotation.bounds.insetBy(dx: -40, dy: -80), on: page)
+        }
+        spotlightNoteID = note.id
+        let ann = note.annotation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.flash(ann) }
+    }
+
+    private var flashView: NSView?
+
+    /// A thin dark outline around an annotation that fades in and out quickly (drawn over the page, never saved).
+    func flash(_ ann: PDFAnnotation) {
+        guard let page = ann.page, let docView = pdfView.documentView else { return }
+        flashView?.removeFromSuperview()
+        let viewRect = pdfView.convert(ann.bounds.insetBy(dx: -3, dy: -3), from: page)
+        let v = NSView(frame: docView.convert(viewRect, from: pdfView))
+        v.wantsLayer = true
+        v.layer?.borderColor = NSColor.black.withAlphaComponent(0.7).cgColor
+        v.layer?.borderWidth = 1.5
+        v.layer?.cornerRadius = 3
+        v.alphaValue = 0
+        docView.addSubview(v)
+        flashView = v
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            v.animator().alphaValue = 1
+        }, completionHandler: {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = 0.3
+                    v.animator().alphaValue = 0
+                }, completionHandler: {
+                    v.removeFromSuperview()
+                    if self.flashView === v { self.flashView = nil }
+                })
+            }
+        })
     }
 
     func refreshNotes() {
@@ -2137,6 +2222,12 @@ final class Library: ObservableObject {
         else if let e = hit.entry { openPaperNote(entry: e) }
     }
 
+    /// Every note tagged #tag (a tag chip on a note card).
+    func showTag(_ tag: String) {
+        scope = Library.myNotesScope
+        query = "#" + tag
+    }
+
     /// “quote” [@key, p. 12], ready to paste into a draft.
     func copyQuote(_ quote: String, pageLabel: String, entry: BibEntry?, path: String?) {
         var e = entry ?? path.flatMap { bib.entry(forPath: $0) }
@@ -2358,7 +2449,7 @@ final class Library: ObservableObject {
             }
             if myNotes {
                 let hits = empty ? self.notedPapers(bib: bib, indexed: indexed)
-                                 : (fts.isEmpty ? [] : self.noteHits(fts, bib: bib, indexed: indexed))
+                                 : (fts.isEmpty ? [] : self.noteHits(fts, tags: Marginalia.tags(in: q), bib: bib, indexed: indexed))
                 DispatchQueue.main.async {
                     guard g == self.searchGen else { return }
                     self.results = hits
@@ -2499,9 +2590,11 @@ final class Library: ObservableObject {
     }
 
     /// Search in ▸ My Notes, with words typed: one result per note.
-    private func noteHits(_ fts: String, bib: BibIndex, indexed: Set<String>) -> [Hit] {
-        // Essential passages first, otherwise best match first
-        let rows = reader.searchNotes(fts).enumerated()
+    private func noteHits(_ fts: String, tags: [String] = [], bib: BibIndex, indexed: Set<String>) -> [Hit] {
+        // Essential passages first, otherwise best match first; "#tag" in the query keeps only notes tagged with it
+        let rows = reader.searchNotes(fts)
+            .filter { r in tags.allSatisfy { Marginalia.hasTag(r.comment + "\n" + r.quote, $0) } }
+            .enumerated()
             .sorted { a, b in (a.element.kind == "e") != (b.element.kind == "e") ? a.element.kind == "e" : a.offset < b.offset }
             .map { $0.element }
         return rows.compactMap { (r: NoteRow) -> Hit? in
@@ -2990,6 +3083,7 @@ enum SelfTest {
         }
         let now = Date().timeIntervalSince1970
         print("SELFTEST recent labels: \(Library.when(now - 60)) | \(Library.when(now - 86_400)) | \(Library.when(now - 3 * 86_400)) | \(Library.when(now - 40 * 86_400)) | \(Library.when(now - 400 * 86_400))")
+        print("SELFTEST tags: \(Marginalia.tags(in: "key idea #improvisation and #Ecology/sound, #improvisation again; not C# or page#3 or #1 or &#39;")) (expect [improvisation, Ecology/sound]) | has: \(Marginalia.hasTag("see #Ecology/sound here", "ecology")) \(Marginalia.hasTag("#improvisational", "improvisation")) (expect true false)")
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)
@@ -3040,6 +3134,30 @@ enum Marginalia {
         guard let c = summaryAnnotation(doc)?.contents else { return "" }
         return String(c.dropFirst(summaryHeading.count)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    private static let tagPattern = try! NSRegularExpression(
+        pattern: "(?<![\\p{L}\\p{N}_&/#])#([\\p{L}_][\\p{L}\\p{N}_\\-/]*)")
+
+    /// #tags in a note, in order, without repeats (Obsidian's rules: starts with a letter; letters, digits, _ - /)
+    static func tags(in text: String) -> [String] {
+        let ns = text as NSString
+        var seen = Set<String>()
+        var out: [String] = []
+        for m in tagPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            var t = ns.substring(with: m.range(at: 1))
+            while t.hasSuffix("/") || t.hasSuffix("-") { t.removeLast() }
+            if !t.isEmpty, seen.insert(t.lowercased()).inserted { out.append(t) }
+        }
+        return out
+    }
+
+    /// does this text carry #tag (or a nested #tag/sub)?
+    static func hasTag(_ text: String, _ tag: String) -> Bool {
+        let esc = NSRegularExpression.escapedPattern(for: tag)
+        guard let re = try? NSRegularExpression(pattern: "(?<![\\p{L}\\p{N}_&/#])#" + esc + "(?![\\p{L}\\p{N}_\\-])",
+                                                options: [.caseInsensitive]) else { return false }
+        return re.firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length)) != nil
+    }
+
     static let startMarker = "<!-- marginalia:start -->"
     static let endMarker = "<!-- marginalia:end -->"
 
@@ -3306,8 +3424,9 @@ struct MarginColumn: View {
             VStack(alignment: .leading, spacing: 4) {
                 Label("Select text, then press H to highlight it", systemImage: "highlighter")
                 Label("Tick Essential for the passages that matter most", systemImage: "checkmark.square")
+                Label("Type #tags in a note; click one to see them all", systemImage: "number")
                 Label("Type a note under a highlight. It saves itself", systemImage: "square.and.pencil")
-                Label("Click a page number to go to the passage", systemImage: "arrow.turn.down.right")
+                Label("Click a card to see its passage in the PDF", systemImage: "arrow.turn.down.right")
                 Label("Trash button removes a highlight and its note", systemImage: "trash")
                 Label("“About this paper” is for notes on the whole paper", systemImage: "doc.text")
             }
@@ -3436,12 +3555,21 @@ struct NoteCard: View {
                 .toggleStyle(.checkbox)
                 .help("Tick for the passages that matter most (red-pink). Unticked = Interesting (yellow).")
             }
+            let tags = Marginalia.tags(in: text)
+            if !tags.isEmpty {
+                FlowLayout(spacing: 4) {
+                    ForEach(tags, id: \.self) { t in TagChip(tag: t) }
+                }
+            }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .stroke(viewer.spotlightNoteID == note.id ? Color.orange : Color.secondary.opacity(0.15),
-                    lineWidth: viewer.spotlightNoteID == note.id ? 2.5 : 1))
+            .stroke(viewer.spotlightNoteID == note.id ? Color.primary.opacity(0.55) : Color.secondary.opacity(0.15),
+                    lineWidth: viewer.spotlightNoteID == note.id ? 1.5 : 1))
+        .contentShape(Rectangle())
+        // a click anywhere on the card (the note box too) shows its highlight in the PDF
+        .simultaneousGesture(TapGesture().onEnded { viewer.reveal(note) })
         .onAppear {
             if !loaded { text = note.comment; loaded = true }
             if viewer.focusNoteID == note.id { DispatchQueue.main.async { focused = true; viewer.focusNoteID = nil } }
