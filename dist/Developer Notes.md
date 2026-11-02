@@ -116,6 +116,8 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
 5. **Bibliography**: `BibEntry`, `BibIndex` (lookup by PDF path or by file name = key), `BibParser`
    (byte-level BibTeX parser with light LaTeX decoding), `CiteKey` (the key rule; mirrored in
    `tools/bibtools.py`), `BibWriter` (formatting, escaping `& % # _`, appending to `library.bib`).
+   Organisation authors are written in double braces (`author = {{National Science Foundation}}`);
+   `BibEntry.organisations` keeps them whole in `shortCite` ("National Science Foundation (2022)").
    `Library.reloadBib()` re-reads `library.bib` plus reference `.bib` files whenever one changes
    (checked on launch, after indexing and whenever the app comes to the front), then
    `applyBibToIndex` rewrites each file's page-0 row with title/authors/year/key so they're searchable.

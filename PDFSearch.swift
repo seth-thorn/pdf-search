@@ -2817,9 +2817,21 @@ struct BibEntry: Identifiable {
         if let comma = person.firstIndex(of: ",") { return String(person[..<comma]).trimmingCharacters(in: .whitespaces) }
         return person.split(separator: " ").last.map(String.init) ?? person
     }
-    /// "Cascone (2000)", "Fasciani & Goode (2021)", "Smith et al. (2019)"
+    /// Organisations written in double braces in the .bib (`{{National Science Foundation}}`): shown whole,
+    /// never cut down to a "surname".
+    var organisations: Set<String> {
+        let r = raw["author"] ?? raw["editor"] ?? ""
+        var out: Set<String> = []
+        for part in r.components(separatedBy: " and ") {
+            let p = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            if p.hasPrefix("{") && p.hasSuffix("}") { out.insert(BibParser.decodeLaTeX(p)) }
+        }
+        return out
+    }
+    /// "Cascone (2000)", "Fasciani & Goode (2021)", "Smith et al. (2019)", "National Science Foundation (2022)"
     var shortCite: String {
-        let names = people.map(BibEntry.lastName)
+        let orgs = organisations
+        let names = people.map { orgs.contains($0) ? $0 : BibEntry.lastName($0) }
         let who: String
         switch names.count {
         case 0: who = "Anon."
@@ -3196,6 +3208,8 @@ enum SelfTest {
         print("SELFTEST tags: \(Marginalia.tags(in: "key idea #improvisation and #Ecology/sound, #improvisation again; not C# or page#3 or #1 or &#39;")) (expect [improvisation, Ecology/sound]) | has: \(Marginalia.hasTag("see #Ecology/sound here", "ecology")) \(Marginalia.hasTag("#improvisational", "improvisation")) (expect true false)")
         print("SELFTEST obsidian vaults: \(ObsidianVaults.list().map { $0.name + " " + $0.path })")
         print("SELFTEST phrase search: \(Library.parse("Accessible instrument des").fts) | \(Library.parse("accessible, design").fts) | \(Library.parse("#improvisation listening body").fts) | terms \(Library.parse("accessible instrument design").terms)")
+        let orgBib = "@misc{nsf2022advancing,\n  author = {{National Science Foundation}},\n  title = {AISL},\n  year = {2022}\n}\n@book{x,\n  author = {Ito, Mizuko and boyd, danah and {Make Noise}},\n  year = {2010}\n}\n"
+        print("SELFTEST organisations: \(BibParser.parse(orgBib, inLibrary: true).map { $0.shortCite }) (expect [National Science Foundation (2022), Ito et al. (2010)])")
         let fts = Library.parse("glitch \"post digital\"").fts
         print("SELFTEST notes query: \(fts) | note file: \(Marginalia.noteFileName(key: "a/b:c"))")
         let link = Marginalia.link(path: "/Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf", page: 3)
