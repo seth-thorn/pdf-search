@@ -70,6 +70,8 @@ All of them use one plain bibliography file, `library.bib`.
 
 Photograph the pages you've marked, and they become part of your library. Nothing leaves your Mac except the book lookup.
 
+![A photographed book page in PDF Search: the yellow streak in the margin beside the underlined lines has become a highlight, with a note card on the right and the book's cover in the results](docs/guide/07-book-pages.jpg)
+
 1. **Copy your photos** into the `Book Photos` folder inside your Papers folder (**File ▸ Open Book Photos Folder**).
 2. **That's all.** PDF Search takes them within about 10 seconds if it's open, or when you next open it, and then shows you the book.
 
