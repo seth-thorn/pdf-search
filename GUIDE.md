@@ -8,8 +8,8 @@ What PDF Search does, step by step. (To install it, see the [TL;DR in the README
 
 ![Searching across all PDFs: results on the left with thumbnails and highlighted snippets; the open PDF with every match marked in orange](docs/guide/01-search.jpg)
 
-- **Type in the search box** (top left). Every PDF in your Papers folder is searched as you type. Several words are found as that **exact phrase** (capitals don't matter): `accessible instrument design`.
-- To find separate words anywhere on the same page, put **commas** between them: `accessible, design`.
+- **Type in the search box** (top left). Every PDF in your Papers folder is searched as you type. A PDF must contain **all your words**, anywhere in it (capitals don't matter): `accessible design`.
+- For an **exact phrase**, use quotes: `"accessible instrument design"`.
 - **Results** show each paper's first page (a book shows its cover), title, author and year, its citation key (`@davanzo2020dimension`), and the matching text.
 - **Click a result** to open it. Your search words are marked in **orange**. The arrows at the top (**‹ 1 of 109 ›**, or ⌘G) jump from match to match.
 - **Search in** narrows the search: one folder, **My Notes** (only what you've written), **Recently Edited** (papers you've worked on) or **Recently Added**.

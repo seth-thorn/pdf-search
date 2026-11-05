@@ -106,12 +106,13 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    - `index(urls)` skips unchanged files (same mtime + size), extracts text in parallel
      (`OperationQueue`, cores − 2 workers, PDFKit `page.string`), writes each file in its own
      transaction under a lock, and publishes progress (and refreshes results every 100 files).
-   - `runSearchNow()` calls `parse(query)` then `reader.search(fts, scope:)` or
+   - `runSearchNow()` calls `parse(query)` then `reader.search(all:scope:)` or
      `reader.allFiles(scope:)`, plus `count(scope:)`. A generation counter (`searchGen`) drops stale results.
-   - `parse(q)`: the words between commas (or semicolons) become one phrase, `"w1 w2 w3"*` (exact
-     phrase, last word may be unfinished); each comma-separated group and each `#tag` or `"quoted phrase"`
-     (exact, no prefix) is a separate term, joined with spaces (= AND, same page). It also returns the
-     plain terms used for marking hits in the PDF.
+   - `parse(q)`: each word is a term `"word"*`, and each `#tag` or `"quoted phrase"` (exact, no prefix) is a term of
+     its own. It returns them as `parts`, joined with spaces as `fts` (= AND in one row, used for notes), and the plain
+     terms for marking hits in the PDF. `DB.search(all:scope:)` wants every part somewhere in the PDF: it
+     intersects each part's files, then shows pages matching any part (`p1 OR p2`). FTS rows are pages, so a plain AND
+     would mean "on the same page".
    - `renameFolder`, `removeFolder`, `remove` (exclude files), `confirmClear`, `choose` (open panel).
 5. **Bibliography**: `BibEntry`, `BibIndex` (lookup by PDF path or by file name = key), `BibParser`
    (byte-level BibTeX parser with light LaTeX decoding), `CiteKey` (the key rule; mirrored in
@@ -243,7 +244,7 @@ PDFKit) need to agree, and stemming would match words that can't be marked.
 
 - Scanned PDFs without a text layer aren't searchable (OCR runs only on photos added as book pages). They show "no text".
 - Book photos: handwriting is read by the same OCR, so margin notes are often wrong. Mixed books with no copyright page all land in one book. A full-book PDF isn't given highlights from photos yet.
-- Search is AND-only, same page. No OR/NOT/NEAR in the UI (FTS5 supports them; see ideas).
+- Search is AND-only. No OR/NOT/NEAR in the UI (FTS5 supports them; see ideas).
 - New PDFs in an added folder are picked up on launch or ⌘R, not live.
 - Password-protected PDFs are skipped ("can't read") and can't be highlighted.
 - Very common words can produce thousands of marks; capped at ~5000 per document.

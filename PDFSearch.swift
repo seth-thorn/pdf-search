@@ -742,7 +742,7 @@ struct ReadmeCard: View {
         ("Add book pages",
          "Put photos of book pages in the Book Photos folder (File ▸ Open Book Photos Folder), and PDF Search takes them by itself. They become a searchable PDF of the book, in page order. Add one book at a time, or start each book’s photos with its copyright page. A new book always needs its copyright page."),
         ("Find",
-         "Type a word or an exact phrase (capitals don’t matter). To find separate words anywhere on a page, put commas between them. Use “Search in” to narrow it: a folder, My Notes (only what you’ve written), or Recently Edited (papers you’ve worked on)."),
+         "Type words: a PDF must contain them all, anywhere in it (capitals don’t matter). Put \"quotes\" around an exact phrase. Use “Search in” to narrow it: a folder, My Notes (only what you’ve written), or Recently Edited (papers you’ve worked on)."),
         ("Read",
          "Click a result. Your search words are marked in orange; ⌘G jumps to the next one."),
         ("Highlight",
@@ -2727,7 +2727,7 @@ final class Library: ObservableObject {
         let bib = self.bib
         let indexed = self.indexedPaths
         readQ.async {
-            let (fts, terms) = Library.parse(q)
+            let (fts, terms, parts) = Library.parse(q)
             let empty = q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if recent {
                 // papers you've worked on (or added), newest first; typing searches just those
@@ -2739,7 +2739,7 @@ final class Library: ObservableObject {
                     hits = []
                 } else {
                     let times = Dictionary(rec.map { ($0.id, $0.time) }, uniquingKeysWith: { a, b in max(a, b) })
-                    hits = self.reader.search(fts, scope: nil)
+                    hits = self.reader.search(all: parts, scope: nil)
                         .compactMap { h -> Hit? in
                             guard let t = times[h.id] else { return nil }
                             return Hit(id: h.id, path: h.path, page: h.page, badge: Library.when(t), snippet: h.snippet)
@@ -2772,7 +2772,7 @@ final class Library: ObservableObject {
             } else if fts.isEmpty {
                 hits = []
             } else {
-                hits = self.reader.search(fts, scope: scope)
+                hits = self.reader.search(all: parts, scope: scope)
                 self.attachNotes(&hits, fts: fts, scope: scope, bib: bib, indexed: indexed)
             }
             for i in hits.indices where hits[i].entry == nil { hits[i].entry = bib.entry(forPath: hits[i].path) }
@@ -2802,11 +2802,11 @@ final class Library: ObservableObject {
         }
     }
 
-    /// What you type is searched as one exact phrase (capitals and accents ignored); the last word may be
-    /// unfinished ("accessible instrument des" finds "accessible instrument design"). Commas separate phrases
-    /// that must all be on the same page, in any order ("accessible, design"). #tags and "quoted phrases"
-    /// (matched exactly, no unfinished last word) are terms of their own.
-    static func parse(_ q: String) -> (fts: String, terms: [String]) {
+    /// Separate words must all be in the PDF, anywhere in it, in any order; the last letters of a word may be
+    /// missing ("access" finds "accessible"). "Quoted text" is an exact phrase. Capitals and accents are ignored.
+    /// Commas and semicolons separate words like spaces do. A #tag is a term of its own.
+    /// `fts` asks for every term in one row, which is how notes are matched; `parts` is each term alone.
+    static func parse(_ q: String) -> (fts: String, terms: [String], parts: [String]) {
         var parts: [String] = []
         var terms: [String] = []
         let ns = q as NSString
@@ -2817,27 +2817,21 @@ final class Library: ObservableObject {
                 .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             if hasWordChars(phrase) { parts.append("\"\(phrase)\""); terms.append(phrase) }
         }
-        let rest = re.stringByReplacingMatches(in: q, range: full, withTemplate: " , ")
+        let rest = re.stringByReplacingMatches(in: q, range: full, withTemplate: " ")
             .replacingOccurrences(of: "\"", with: " ")
-        for group in rest.split(whereSeparator: { $0 == "," || $0 == ";" }) {
-            var words: [String] = []
-            for w in group.split(whereSeparator: { $0.isWhitespace }) {
-                let word = String(w)
-                guard hasWordChars(word) else { continue }
-                if word.hasPrefix("#") {
-                    // a #tag is its own term (My Notes keeps only notes really tagged with it)
-                    let tag = String(word.drop(while: { $0 == "#" }))
-                    if hasWordChars(tag) { parts.append("\"\(tag)\""); terms.append(tag) }
-                } else {
-                    words.append(word)
-                }
+        for w in rest.split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == ";" }) {
+            let word = String(w)
+            guard hasWordChars(word) else { continue }
+            if word.hasPrefix("#") {
+                // a #tag is its own term (My Notes keeps only notes really tagged with it)
+                let tag = String(word.drop(while: { $0 == "#" }))
+                if hasWordChars(tag) { parts.append("\"\(tag)\""); terms.append(tag) }
+            } else {
+                parts.append("\"\(word)\"*")      // FTS5: * means the word may go on
+                terms.append(word)
             }
-            guard !words.isEmpty else { continue }
-            let phrase = words.joined(separator: " ")
-            parts.append("\"\(phrase)\"*")       // FTS5: the * applies to the phrase's last word
-            terms.append(phrase)
         }
-        return (parts.joined(separator: " "), terms)
+        return (parts.joined(separator: " "), terms, parts)
     }
 
     /// Every term must match: a phrase anywhere, a word at the start of a word.
@@ -3446,6 +3440,7 @@ enum SelfTest {
         func line(_ t: String, _ y: CGFloat) -> OCRLine { OCRLine(text: t, box: CGRect(x: 0.1, y: y, width: 0.8, height: 0.02), words: []) }
         print("SELFTEST page numbers: \(r.printedNumber([line("143", 0.05)], cropped: true) ?? "-") \(r.printedNumber([line("42 THE BOOK TITLE", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("CONTRIBUTORS vii", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("12 Ibid., 46.", 0.05)], cropped: true) ?? "none") \(r.fillGaps(["142", nil, "144"]).map { $0 ?? "?" }) (expect 143 42 vii none [142, 143, 144])")
         print("SELFTEST photo isbn: \(r.isbns(in: "ISBN 978-0-415-99873-4 (pbk)")) bad=\(r.isbns(in: "ISBN 978-0-415-99873-5")) ten=\(r.isbn13("0-415-99873-5") ?? "-") (expect [9780415998734] [] 9780415998734)")
+        print("SELFTEST search words: \(Library.parse("Peters Taylor").parts) | \(Library.parse("\"exact phrase\" other").parts) | \(Library.parse("one, two").parts) (expect each word apart, the quoted phrase whole)")
         print("SELFTEST title check: \(r.titleAppears("The Aesthetics of Failure", in: "Aesthetics of Failure, by Kim Cascone")) \(r.titleAppears("Protein Folding Models", in: "The aesthetics of failure")) (expect true false)")
         print("SELFTEST head match: \(r.headMatches("THE POETICS OF SPACE", title: "The Poetics of Space: A Study")) \(r.headMatches("Introduction", title: "The Poetics of Space")) (expect true false)")
 
@@ -5942,7 +5937,27 @@ final class DB {
         return out.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    func search(_ query: String, scope: String?) -> [Hit] {
+    /// PDFs containing every term, each anywhere in the PDF. Results show the pages holding any of them.
+    func search(all parts: [String], scope: String?) -> [Hit] {
+        guard let first = parts.first else { return [] }
+        if parts.count == 1 { return search(first, scope: scope) }
+        let f = scopeFilter(scope)
+        var both: Set<Int>?
+        for p in parts {
+            guard let st = prepare("""
+                SELECT DISTINCT fts.rowid / \(PAGE_SLOTS)
+                FROM fts JOIN files ON files.id = fts.rowid / \(PAGE_SLOTS)
+                WHERE fts MATCH ?\(f.sql)
+                """, ([p] as [Any?]) + f.args) else { return [] }
+            var found = Set<Int>()
+            while st.step() { found.insert(st.int(0)) }
+            both = both.map { $0.intersection(found) } ?? found
+            if both?.isEmpty == true { return [] }
+        }
+        return search(parts.joined(separator: " OR "), scope: scope, only: both)
+    }
+
+    func search(_ query: String, scope: String?, only: Set<Int>? = nil) -> [Hit] {
         let f = scopeFilter(scope)
         guard let st = prepare("""
             SELECT fts.rowid, files.path, snippet(fts, 0, char(2), char(3), '…', 14), bm25(fts)
@@ -5957,6 +5972,7 @@ final class DB {
         while st.step() {
             let rowid = st.int(0)
             let fid = rowid / PAGE_SLOTS, page = rowid % PAGE_SLOTS
+            if let o = only, !o.contains(fid) { continue }
             let score = st.double(3)
             if var a = acc[fid] {
                 a.score += score
@@ -5965,6 +5981,13 @@ final class DB {
                 acc[fid] = a
             } else {
                 acc[fid] = Acc(path: st.text(1), score: score, pages: page > 0 ? 1 : 0, page: page, snippet: st.text(2))
+            }
+        }
+        // a very long list of matching pages can leave a PDF out: it still counts, just without a snippet
+        if let o = only, !o.subtracting(acc.keys).isEmpty, let rows = prepare("SELECT id, path FROM files") {
+            while rows.step() {
+                let id = rows.int(0)
+                if o.contains(id) && acc[id] == nil { acc[id] = Acc(path: rows.text(1), score: 0, pages: 0, page: 0, snippet: "") }
             }
         }
         return acc.sorted { $0.value.score < $1.value.score }.map { fid, a in
