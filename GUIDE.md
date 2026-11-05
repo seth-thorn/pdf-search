@@ -18,7 +18,7 @@ What PDF Search does, step by step. (To install it, see the [TL;DR in the README
 
 ## 2. Highlight and write notes in the margin
 
-![A PDF with red Essential and yellow Interesting highlights; on the right, the Highlights & Notes column with a note card for each highlight](docs/guide/02-read-notes.jpg)
+![A PDF with pink Essential and yellow Interesting highlights; on the right, the Highlights & Notes column with a note card for each highlight](docs/guide/02-read-notes.jpg)
 
 - **Select a passage and press H.** It turns **yellow** (Interesting), and a note card opens in the column on the right. Type your thought; it saves itself.
 - **Tick ☐ Essential** on a card for the few passages that matter most. They turn **pink**.
