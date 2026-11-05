@@ -39,15 +39,16 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 
 <img src="dist/icon.png" width="96" align="right" alt="">
 
-- **Add papers and books in one step.** Drop a PDF on the window: PDF Search finds its DOI (or arXiv ID, ISBN, or title), fetches the citation details from doi.org / Crossref / Open Library, shows them on a card to check, then files the PDF as `~/Papers/Library/<key>.pdf` and adds it to `library.bib`. Books without a PDF: type the ISBN.
+- **Add papers and books in one step.** Drop a PDF on the window: PDF Search finds its DOI (or arXiv ID, ISBN, or title), fetches the citation details from doi.org / Crossref / Open Library, shows them on a card to check, then files the PDF as `~/Papers/Library/<key>.pdf` and adds it to `library.bib`. Drop a folder or more than three PDFs and the details are found in the background, with no cards; a result is kept only if its title appears in the PDF. Books without a PDF: type the ISBN.
+- **Book pages from photos.** Put photos of pages in `Papers/Book Photos`. PDF Search crops them, reads them with Apple's text recognition on your Mac, finds the book by the ISBN on its copyright page (or the title at the top of its pages), and builds one searchable PDF per book, in page order, cited by the printed page numbers. A yellow streak in the margin beside underlined lines becomes a highlight. Add one book at a time, or start each book's photos with its copyright page.
 - **Search everything.** Every word of every PDF in your `~/Papers` folder, as you type, with snippets and page counts. What you type is found as an exact phrase (capitals and accents ignored); put commas between words to find them anywhere on the same page (`accessible, design`). Search one folder or all of them.
-- **See them.** Each result shows a thumbnail of the PDF's first page (a book's cover, a paper's first page); books without a PDF show their cover from Open Library.
+- **See them.** Each result shows a thumbnail of the PDF's first page; books show their real cover, from Open Library or Google Books.
 - **Read.** Click a result and the PDF opens at the first match, with every match marked. ⌘G steps through them, and ⌘F finds within the open PDF.
 - **Write in the margins.** Select a passage and press **H**. It's highlighted, and a note box opens in the notes column beside the PDF. Every highlight has a note box, which saves as you type. Tick **Essential** on the few passages that matter most (they turn red-pink; the rest stay yellow). Add **#tags** to notes to group ideas across papers: click a tag to see every note with it (Obsidian sees the same tags). Clicking a note card briefly outlines its passage in the PDF. Each highlight has a clear Remove button. An **About this paper** box holds notes on the whole paper. Notes are saved *inside the PDF* as standard comments, so Preview, Acrobat and other apps see them too, and they're searchable.
 - **Cite.** PDFs are matched to entries in a plain `library.bib`, so results show real titles and authors. **Copy Citation ▾** copies `[@cascone2000aesthetics]` (Markdown/Pandoc, ⇧⌘C), `[[@cascone2000aesthetics]]` (a link to the paper's note in Obsidian) or `\cite{cascone2000aesthetics}` (LaTeX/Overleaf, ⌥⇧⌘C). Books you don't have as PDFs live in the same bibliography.
 - **Projects live in your notes app.** For each thing you're writing, keep a note with `[[@key]]` links to its papers; in Obsidian, backlinks show which projects a paper belongs to.
 - **Search your own notes.** **Search in ▸ My Notes** (⇧⌘F) searches only what you've written: highlighted passages, your notes on them, paper summaries, and your own writing in the paper notes. Each note is a result; click one to jump to it in the PDF, or right-click → *Copy Quote with Citation* for `“…” [@key, p. 12]`. Ordinary searches also show any of your notes that match.
-- **Pick up where you left off.** **Search in ▸ Recently Edited** (⇧⌘E) lists the papers you've highlighted or written notes in, newest first.
+- **Pick up where you left off.** **Search in ▸ Recently Edited** (⇧⌘E) lists the papers you've highlighted or written notes in, newest first. **Recently Added** (⇧⌘D) lists what's new in your library.
 - **Simple toolbar.** Just **Copy Citation**, **Open in Obsidian**, **Notes** and **•••**, plus ‹ › while searching. A **README** link under the results (or Help ▸ PDF Search README, ⌘?) explains the workflow on one page. Drag the dividers to resize the results and notes columns.
 - **Notes that turn into writing.** For every PDF you annotate, PDF Search keeps a Markdown note (`@key.md`) with each quote (Essential passages first), a page-cited reference (`[@key, p. 12]`), a link back to that page, and your note. Write your own thoughts below; they're never overwritten.
 
@@ -90,7 +91,9 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 
 **Citation keys** are last name + year + the first meaningful word of the title, all lowercase: `cascone2000aesthetics`, `collins2006handmade`. If two items would get the same key, the second gets a letter (`…b`).
 
-**Adding papers:** drag a PDF onto the window (or **+ → Add Paper**, ⌘O), check the card, press **Add to Library**. **+ → Add Book or Chapter** (⇧⌘O) looks up an ISBN. Right-click a PDF without details → **Look Up Citation Details…**. To make a folder searchable without adding it to your bibliography: **+ → Add Folder to Search…**.
+**Adding papers:** drag a PDF onto the window (or **+ → Add Paper**, ⌘O), check the card, press **Add to Library**. Drag a whole folder and its PDFs stay where they are while their details are found in the background. **+ → Add Book or Chapter** (⇧⌘O) looks up an ISBN. Right-click a PDF without details → **Look Up Citation Details…**. To make a folder searchable without adding it to your bibliography: **+ → Add Folder to Search…**.
+
+**Adding book pages:** copy photos into `Papers/Book Photos` (**File ▸ Open Book Photos Folder**). PDF Search takes them within about 10 seconds while it's open, or when it next opens. Filed photos move to `Book Photos/Done/<key>`; any it couldn't file move to `Book Photos/Not Filed`. Originals are never deleted. A new book needs a photo of its copyright page.
 
 **Coming from Zotero?** [`tools/import_zotero.py`](tools/) copies your Zotero library into `~/Papers/Library` and writes `library.bib` with fresh keys. It also writes the highlights you made in Zotero's reader into the PDFs. Zotero itself is only read, never changed. See [tools/README.md](tools/README.md).
 
@@ -102,6 +105,8 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 | ⌘F | find inside the open PDF |
 | ⇧⌘F | search only your notes (My Notes) |
 | ⇧⌘E | papers you've recently highlighted or annotated |
+| ⇧⌘D | papers you've recently added |
+| ⌘Z / ⇧⌘Z | undo / redo a highlight added, removed or marked Essential |
 | ⌘G / ⇧⌘G | next / previous match |
 | H | highlight the selected text (a note box opens beside it), also ⌃⌘H |
 | ⇧⌘C / ⌥⇧⌘C | copy `[@key]` / `\cite{key}` for the open paper |

@@ -5,8 +5,8 @@ It has no dependencies, no Xcode project and no package manager.
 
 ## Files
 
-- `PDFSearch.swift`: the entire app (~2,500 lines).
-- `Info.plist`: bundle metadata (bundle id `local.pdfsearch`, version 2.1, min macOS 13; accepts PDFs/folders dropped on the Dock icon; registers the `pdfsearch://` URL scheme).
+- `PDFSearch.swift`: the entire app (~6,000 lines).
+- `Info.plist`: bundle metadata (bundle id `local.pdfsearch`, min macOS 13; accepts PDFs/folders dropped on the Dock icon; registers the `pdfsearch://` URL scheme).
 - `AppIcon.icns`: the icon.
 - `build.sh`: compiles into `/Applications/PDF Search.app` (or `~/Applications` if `/Applications` isn't writable). Quits a running copy first, then runs `PDFSearch --selftest` (exercises the BibTeX parser, key rule, writer and link encoding, and parses your real `library.bib`).
 - `Build PDF Search.command`: double-clickable wrapper. Checks for the developer tools, logs to `build.log`, opens the app.
@@ -71,7 +71,7 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
    - Find state: `showFind`, `findText`, `findFocused`. `activeTerms` = find text when the bar has
      text, else the main search terms. `.task(id: findText)` debounces find typing (150 ms).
    - Drag-and-drop: `.onDrop(of: [.fileURL])` on the whole window.
-3. **PDF viewer**: `HighlightLevel` (two kinds of highlight, 50% alpha: `.interesting` yellow, `.essential`
+3. **PDF viewer**: `HighlightLevel` (two kinds of highlight: `.interesting` yellow, `.essential`
    red-pink; `HighlightLevel.of(annotation)` reads the level from the colour: yellow hue → Interesting, any
    other colour → Essential, sticky notes → none) and
    `HighlightingPDFView` (a `PDFView` subclass whose `menu(for:)` adds "Highlight" / "Remove
@@ -187,6 +187,18 @@ Everything is in `PDFSearch.swift`, in these sections (search for `// MARK:`):
     library.bib → `<vault>/library.bib` (an existing one is copied in).
 17. **SQLite**: thin wrappers `DB` and `Stmt` over the system `libsqlite3` C API.
 
+18. **Book pages from photos** (`// MARK: - Book pages from photos`). `BookPages` and `BookMarks` are the rules, free of Apple frameworks so they can be unit-tested anywhere. `BookPhotos` does the Apple part, all on the Mac: `VNDetectDocumentSegmentationRequest` + `CIPerspectiveCorrection` (crop), `VNRecognizeTextRequest` (OCR, trying other rotations if little text is found), EAN-13 barcodes, `CIDocumentEnhancer` (white paper, for the stored page only; marks are read from the photo as taken).
+    - **Flow:** `Library.checkPhotoInbox` looks in `Papers/Book Photos` on launch, on activation and every 10 s, taking a file once its size stops changing. `addPhotos` → `importPhotos` → `BookPages.groups` (a new ISBN starts a new book) → `identify` (ISBN against library.bib, then `Lookup.book`, then running heads) → `fileBook`. Then photos move to `Done/<key>` or `Not Filed/<key|ISBN n|Unknown book date>`.
+    - **Text layer:** each OCR word is drawn, sized to fit its box, under the opaque picture. Stretching text with the text matrix instead splits words into spaced letters.
+    - **Page numbers:** `PageLabels` keeps a hidden 1-point Square annotation per page, contents `PDFSearch page: 177` or, on photo pages, `PDFSearch photo page: 177`. It stays with its page and survives saves, and Square isn't a markup type, so the notes code ignores it. Read order: marker, the PDF's own label, position. Also `cover`, `front` and `?` (never a guessed number). File ▸ Set Printed Page Number… sets them.
+    - **Marks:** a yellow streak's rows pick the lines; pen strokes (long level runs darker than their surroundings) under words pick where the passage starts and ends. The first line needs two underlined words. Underlines with no yellow are ignored. Passages become Interesting highlights.
+    - **Corrected quotes:** the Edit button stores text after `Edited quote: ` in the highlight's contents (`BookMarks.splitContents/joinContents`), so it's in the PDF, searchable and used in notes.
+19. **Background details** (`Library.lookUpDetails`): a dropped folder, or more than three PDFs, runs `AddPaperModel` with no card. With no one checking, a result is kept only if most of its title's words appear in the PDF's first 8 pages (`BookPages.titleAppears`); ISBN results are trusted.
+20. **Highlight colours are solid.** PDFKit keeps a highlight's transparency only in its first save (`/ca` in the appearance; `/C` has no alpha), so a see-through colour looks different after a reload and resave. `HighlightLevel.nsColor` is the old colour mixed with white at alpha 1; `refreshColor` updates old highlights when a PDF is shown. A new highlight touching an old one extends it (`Marginalia.lineRects`, `BookMarks.mergeLines`). Add, remove and level changes go through the window's undo manager; `show()` clears those steps, because a load makes new page objects.
+21. **Covers:** `Thumbnails.cover` tries each ISBN at Open Library, then Google Books, then a title and author search. Every @book uses it unless its first page is a cover photo. `Thumb` loads with `.task(id:)`, not `.onChange`: an onChange closure sees the old values, so a book's details arriving after the row was drawn were missed.
+22. **Recently Added** (sentinel scope `Library.addedScope`): the `added(path, time)` table. It's separate because `store` replaces a file's row on every re-read. Index version 3 seeds it from file creation dates; new files get the time they arrive.
+23. **Obsidian links** use `obsidian://open?vault=<folder name>&file=<path in vault>`; `open?path=` starts Obsidian but doesn't reliably go to the note.
+
 ### Index schema
 
 ```sql
@@ -201,6 +213,7 @@ notes USING fts5(quote, comment, kind UNINDEXED, page UNINDEXED, label UNINDEXED
       -- kind: h = highlight/note, s = "About this paper", o = a paragraph of a paper note (.md)
 notefiles(id INTEGER PRIMARY KEY, path TEXT UNIQUE, mtime REAL, pdf TEXT, key TEXT)
 edits(path TEXT PRIMARY KEY, time REAL)      -- saves of highlights/notes made in PDF Search
+added(path TEXT PRIMARY KEY, time REAL)      -- when each file first arrived (Recently Added)
       -- files also has `edited REAL`: newest annotation date in the PDF
       -- paper notes whose own text is indexed; pdf = the note's `pdf:` line as written
 ```
@@ -228,21 +241,19 @@ PDFKit) need to agree, and stemming would match words that can't be marked.
 
 ## Known limitations
 
-- Scanned PDFs without a text layer aren't searchable (no OCR). They show "no text".
+- Scanned PDFs without a text layer aren't searchable (OCR runs only on photos added as book pages). They show "no text".
+- Book photos: handwriting is read by the same OCR, so margin notes are often wrong. Mixed books with no copyright page all land in one book. A full-book PDF isn't given highlights from photos yet.
 - Search is AND-only, same page. No OR/NOT/NEAR in the UI (FTS5 supports them; see ideas).
 - New PDFs in an added folder are picked up on launch or ⌘R, not live.
 - Password-protected PDFs are skipped ("can't read") and can't be highlighted.
 - Very common words can produce thousands of marks; capped at ~5000 per document.
 - Folder scopes are by path. If a folder is moved or renamed, remove it and add it again.
-- Highlighting has no undo (use Remove Highlight).
 - Lookups need the internet; Crossref title matches can be the wrong paper, so the card always asks.
 - Margin notes are listed in page order, not pinned next to their passage on screen.
 
 ## Ideas for extending (and where to put them)
 
-- **Batch lookups**: run `Lookup` over all PDFs without details and offer one combined review list.
-- **Undo/redo for highlights**: register add/remove with the window's `NSUndoManager` in
-  `Viewer.addHighlight` / `removeHighlight`.
+- **Batch lookups**: run `Library.lookUpDetails` over PDFs already in the library that have no details.
 - **OCR for scans**: in `Library.extract`, if a page's text is empty, render the page
   (`PDFPage.thumbnail(of:for:)`) and run Vision's `VNRecognizeTextRequest`.
 - **Live updates**: watch added folders with FSEvents and call `index(...)` for changed paths.

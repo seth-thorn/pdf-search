@@ -7,6 +7,10 @@ import PDFKit
 import QuartzCore
 import SQLite3
 import UniformTypeIdentifiers
+import Vision
+import CoreImage
+import CoreText
+import ImageIO
 
 // MARK: - App
 
@@ -32,6 +36,7 @@ struct PDFSearchApp: App {
                     .keyboardShortcut("o")
                 Button("Add Book or Chapter…") { lib.requestAdd([nil]) }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
+                Button("Add Book Pages from Photos…") { lib.choosePhotos() }
                 Button("Add Folder to Search…") { lib.choose() }
                 Divider()
                 Button("Rescan Folders") { lib.refresh() }
@@ -39,7 +44,15 @@ struct PDFSearchApp: App {
                 Button(Marginalia.notesInVault ? "Open Paper Note in Obsidian" : "Open Paper Note") { lib.openNoteRequest += 1 }
                     .keyboardShortcut("o", modifiers: [.command, .option])
                 Button("Write Notes for All Annotated PDFs") { lib.exportAllMarginalia() }
+                Button("Set Printed Page Number…") { Viewer.current?.askPageNumber() }
+                Button("Open Book Photos Folder") { lib.openPhotoInbox() }
                 Button("Clear Index…") { lib.confirmClear() }
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { Viewer.current?.undoLast() }
+                    .keyboardShortcut("z")
+                Button("Redo") { Viewer.current?.redoLast() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .help) {
                 Button("PDF Search README") { lib.readmeRequest += 1 }
@@ -57,6 +70,8 @@ struct PDFSearchApp: App {
                     .keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Show Recently Edited") { lib.scope = Library.recentScope }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
+                Button("Show Recently Added") { lib.scope = Library.addedScope }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
                 Button("Highlight Selection (or press H)") { lib.noteRequest += 1 }
                     .keyboardShortcut("h", modifiers: [.command, .control])
                 Divider()
@@ -242,12 +257,14 @@ struct ContentView: View {
     var searchPrompt: String {
         if inMyNotes { return "Search your notes" }
         if inRecent { return "Search recently edited papers" }
+        if inAdded { return "Search recently added papers" }
         if let s = lib.scope, let f = lib.folders.first(where: { $0.path == s }) { return "Search \(f.name)" }
         return "Search everything"
     }
     var scopeFolder: Folder? { lib.scope.flatMap { s in lib.folders.first { $0.path == s } } }
     var inMyNotes: Bool { lib.scope == Library.myNotesScope }
     var inRecent: Bool { lib.scope == Library.recentScope }
+    var inAdded: Bool { lib.scope == Library.addedScope }
 
     /// the entry behind the first selected result
     func entryFor(_ ids: Set<Int>) -> BibEntry? {
@@ -261,6 +278,7 @@ struct ContentView: View {
                 Text("Everything (\(lib.docCount))").tag(String?.none)
                 Label("My Notes", systemImage: "highlighter").tag(Optional(Library.myNotesScope))
                 Label("Recently Edited", systemImage: "clock").tag(Optional(Library.recentScope))
+                Label("Recently Added", systemImage: "plus.circle").tag(Optional(Library.addedScope))
                 Divider()
                 ForEach(lib.folders) { f in
                     Text(verbatim: String(repeating: "\u{2003}", count: f.depth) + "\(f.name)  (\(f.count))")
@@ -288,7 +306,7 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .disabled(lib.scope == nil || inRecent)
+            .disabled(lib.scope == nil || inRecent || inAdded)
             .help("Folder or notes options")
         }
         .padding(.horizontal, 10)
@@ -343,6 +361,9 @@ struct ContentView: View {
                     } else if lib.results.isEmpty && inRecent {
                         Text("Nothing yet.\nPapers you highlight or write notes in\nappear here, newest first.")
                             .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                    } else if lib.results.isEmpty && inAdded {
+                        Text("Nothing yet.\nPapers and books you add\nappear here, newest first.")
+                            .multilineTextAlignment(.center).foregroundStyle(.secondary)
                     } else if lib.results.isEmpty && inMyNotes {
                         Text("No notes yet.\nSelect text in a PDF and press H.")
                             .multilineTextAlignment(.center).foregroundStyle(.secondary)
@@ -358,6 +379,7 @@ struct ContentView: View {
                     Button("Add Paper (PDF)…") { lib.choosePapers() }
                     Button("Add Book or Chapter…") { lib.requestAdd([nil]) }
                     Divider()
+                    Button("Add Book Pages from Photos…") { lib.choosePhotos() }
                     Button("Add Folder to Search…") { lib.choose() }
                 } label: { Label("Add", systemImage: "plus") }
                     .help("Add a paper, a book, or a folder to search (or drag a PDF into the window)")
@@ -386,13 +408,15 @@ struct ContentView: View {
         HStack(spacing: 8) {
             if let f = lib.flash {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text(f).foregroundStyle(.primary).lineLimit(1)
+                Text(f).foregroundStyle(.primary).lineLimit(5).fixedSize(horizontal: false, vertical: true)
             } else if let p = lib.progress {
                 ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
                     .frame(width: 70)
                 Text("Indexing \(p.done) of \(p.total)…")
             } else if let err = lib.errorMessage {
                 Text(err).foregroundStyle(.red)
+            } else if inAdded {
+                Text(lib.results.count == 1 ? "1 paper recently added" : "\(lib.results.count) papers recently added")
             } else if inRecent {
                 Text(lib.results.count == 1 ? "1 paper you've worked on" : "\(lib.results.count) papers you've worked on")
             } else if inMyNotes {
@@ -641,8 +665,9 @@ struct HitRow: View {
     }
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Thumb(path: hit.path, isbn: hit.path.isEmpty ? hit.entry.flatMap { Thumbnails.isbn($0.fields["isbn"]) } : nil,
-                  symbol: symbol)
+            Thumb(path: hit.path, isbn: hit.entry.flatMap { $0.type == "book" || hit.path.isEmpty ? Thumbnails.isbns($0.fields["isbn"]) : nil },
+                  symbol: symbol,
+                  book: hit.path.isEmpty ? nil : hit.entry.flatMap { $0.type == "book" ? $0.title + "|" + ($0.people.first.map(BibEntry.lastName) ?? "") : nil })
                 .padding(.top, 2)
             details
         }
@@ -714,6 +739,8 @@ struct ReadmeCard: View {
     private let steps: [(String, String)] = [
         ("Add a paper",
          "Drag a PDF onto the window. Check the citation details on the card, then click Add to Library. The PDF is filed in your Papers folder."),
+        ("Add book pages",
+         "Put photos of book pages in the Book Photos folder (File ▸ Open Book Photos Folder), and PDF Search takes them by itself. They become a searchable PDF of the book, in page order. Add one book at a time, or start each book’s photos with its copyright page. A new book always needs its copyright page."),
         ("Find",
          "Type a word or an exact phrase (capitals don’t matter). To find separate words anywhere on a page, put commas between them. Use “Search in” to narrow it: a folder, My Notes (only what you’ve written), or Recently Edited (papers you’ve worked on)."),
         ("Read",
@@ -839,6 +866,7 @@ struct Thumb: View {
     let path: String
     let isbn: String?
     let symbol: String
+    var book: String? = nil     // "title|author", to search for a cover when there's no ISBN to go on
     @State private var image: NSImage?
     @State private var loadedKey = ""
 
@@ -859,17 +887,17 @@ struct Thumb: View {
             }
         }
         .frame(width: 36, height: 48)
-        .onAppear { load() }
-        .onChange(of: path) { _ in load() }
-        .onChange(of: isbn) { _ in load() }
+        // .task(id:), not .onChange: an onChange closure still sees the old values, so a book's details arriving
+        // after the row was drawn never reached load()
+        .task(id: path + "|" + (isbn ?? "") + "|" + (book ?? "")) { load() }
     }
 
     private func load() {
-        let key = path + "|" + (isbn ?? "")
+        let key = path + "|" + (isbn ?? "") + "|" + (book ?? "")
         guard key != loadedKey else { return }
         loadedKey = key
         image = nil
-        Thumbnails.shared.image(pdf: path.isEmpty ? nil : path, isbn: isbn) { img in
+        Thumbnails.shared.image(pdf: path.isEmpty ? nil : path, isbn: isbn, book: book) { img in
             if loadedKey == key { image = img }
         }
     }
@@ -905,14 +933,21 @@ final class Thumbnails {
         return Lookup.isbn(in: f)
     }
 
+    /// Every ISBN in a bibliography field, separated by spaces, or nil if there are none.
+    static func isbns(_ field: String?) -> String? {
+        guard let f = field else { return nil }
+        let all = f.split(whereSeparator: { $0 == "," || $0 == ";" || $0 == " " || $0 == "/" }).compactMap { Lookup.isbn(in: String($0)) }
+        return all.isEmpty ? Lookup.isbn(in: f) : all.joined(separator: " ")
+    }
+
     /// Calls back on the main thread with the picture, or nil.
-    func image(pdf path: String?, isbn: String?, done: @escaping (NSImage?) -> Void) {
+    func image(pdf path: String?, isbn: String?, book: String? = nil, done: @escaping (NSImage?) -> Void) {
         let key: String
         if let p = path {
             let a = try? FileManager.default.attributesOfItem(atPath: p)
             let m = (a?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
             let s = (a?[.size] as? NSNumber)?.intValue ?? 0
-            key = "pdf|\(p)|\(m)|\(s)"
+            key = "pdf|\(p)|\(m)|\(s)" + (isbn == nil && book == nil ? "" : "|cover2|" + (isbn ?? ""))
         } else if let i = isbn {
             key = "isbn|\(i)"
         } else {
@@ -932,8 +967,20 @@ final class Thumbnails {
                 data = d
             } else if !fm.fileExists(atPath: none.path) {
                 if let p = path {
-                    data = autoreleasepool { Thumbnails.render(p) }
+                    // a book shows its real cover, unless you photographed the cover yourself
+                    var cover: Cover = .missing
+                    if isbn != nil || book != nil, !BookPhotos.hasCover(URL(fileURLWithPath: p)) { cover = Thumbnails.cover(isbn ?? "", book: book) }
+                    if case .found(let d) = cover { data = d }
+                    else { data = autoreleasepool { Thumbnails.render(p) } }
                     if data == nil { fm.createFile(atPath: none.path, contents: nil) }
+                    if case .offline = cover {     // show the page for now; look for the cover again another time
+                        let img = data.flatMap { NSImage(data: $0) }
+                        DispatchQueue.main.async {
+                            let calls = self.waiting.removeValue(forKey: key) ?? []
+                            for c in calls { c(img) }
+                        }
+                        return
+                    }
                 } else if let i = isbn {
                     switch Thumbnails.cover(i) {
                     case .found(let d): data = d
@@ -987,21 +1034,76 @@ final class Thumbnails {
     enum Cover { case found(Data), missing, offline }
 
     /// A book cover from Open Library (no picture → .missing; no connection → .offline).
-    static func cover(_ isbn: String) -> Cover {
-        guard let url = URL(string: "https://covers.openlibrary.org/b/isbn/\(isbn)-M.jpg?default=false") else { return .missing }
+    /// Tries each ISBN (hardback and paperback often differ) at Open Library and Google Books, then, for a
+    /// `book` ("title|author"), a search by title and author.
+    static func cover(_ isbns: String, book: String? = nil) -> Cover {
+        var offline = false
+        func tried(_ c: Cover) -> Data? {
+            switch c {
+            case .found(let d): return d
+            case .offline: offline = true; return nil
+            case .missing: return nil
+            }
+        }
+        let list = isbns.split(separator: " ").map(String.init)
+        for i in list { if let d = tried(picture("https://covers.openlibrary.org/b/isbn/\(i)-M.jpg?default=false")) { return .found(d) } }
+        for i in list { if let d = tried(googleCover("isbn:" + i)) { return .found(d) } }
+        if let parts = book?.components(separatedBy: "|"), parts.count == 2 {
+            let title = parts[0].components(separatedBy: CharacterSet(charactersIn: ":;")).first ?? parts[0]
+            if let d = tried(openLibrarySearch(title: title, author: parts[1])) { return .found(d) }
+            if let d = tried(googleCover("intitle:" + title + (parts[1].isEmpty ? "" : " inauthor:" + parts[1]))) { return .found(d) }
+        }
+        return offline ? .offline : .missing
+    }
+
+    private static func fetch(_ url: URL) -> (data: Data?, status: Int?) {
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue(Lookup.userAgent, forHTTPHeaderField: "User-Agent")
         let sem = DispatchSemaphore(value: 0)
-        var result = Cover.offline
+        var out: (data: Data?, status: Int?) = (nil, nil)
         URLSession.shared.dataTask(with: req) { d, r, _ in
-            if let h = r as? HTTPURLResponse {
-                if h.statusCode == 200, let d = d, d.count > 500, NSImage(data: d) != nil { result = .found(d) }
-                else if h.statusCode == 404 { result = .missing }
-            }
+            out = (d, (r as? HTTPURLResponse)?.statusCode)
             sem.signal()
         }.resume()
         _ = sem.wait(timeout: .now() + 20)
-        return result
+        return out
+    }
+
+    private static func picture(_ address: String) -> Cover {
+        guard let url = URL(string: address) else { return .missing }
+        let (d, s) = fetch(url)
+        if s == 200, let d = d, d.count > 500, NSImage(data: d) != nil { return .found(d) }
+        return s == nil ? .offline : .missing
+    }
+
+    private static func googleCover(_ query: String) -> Cover {
+        var c = URLComponents(string: "https://www.googleapis.com/books/v1/volumes")
+        c?.queryItems = [URLQueryItem(name: "q", value: query)]
+        guard let api = c?.url else { return .missing }
+        let (body, status) = fetch(api)
+        guard status != nil else { return .offline }
+        guard let b = body, let j = (try? JSONSerialization.jsonObject(with: b)) as? [String: Any],
+              let items = j["items"] as? [[String: Any]] else { return .missing }
+        for item in items {
+            if let v = item["volumeInfo"] as? [String: Any], let links = v["imageLinks"] as? [String: Any],
+               let t = links["thumbnail"] as? String {
+                return picture(t.replacingOccurrences(of: "http://", with: "https://"))
+            }
+        }
+        return .missing
+    }
+
+    private static func openLibrarySearch(title: String, author: String) -> Cover {
+        var c = URLComponents(string: "https://openlibrary.org/search.json")
+        c?.queryItems = [URLQueryItem(name: "title", value: title), URLQueryItem(name: "author", value: author),
+                         URLQueryItem(name: "fields", value: "cover_i"), URLQueryItem(name: "limit", value: "5")]
+        guard let api = c?.url else { return .missing }
+        let (body, status) = fetch(api)
+        guard status != nil else { return .offline }
+        guard let b = body, let j = (try? JSONSerialization.jsonObject(with: b)) as? [String: Any],
+              let docs = j["docs"] as? [[String: Any]],
+              let id = docs.compactMap({ $0["cover_i"] as? Int }).first else { return .missing }
+        return picture("https://covers.openlibrary.org/b/id/\(id)-M.jpg?default=false")
     }
 }
 
@@ -1058,9 +1160,22 @@ enum HighlightLevel: String, CaseIterable, Identifiable {
     var name: String { self == .essential ? "Essential" : "Interesting" }
     var nsColor: NSColor {
         switch self {
-        case .essential:   return NSColor(srgbRed: 0.96, green: 0.33, blue: 0.45, alpha: 0.5)
-        case .interesting: return NSColor(srgbRed: 1.00, green: 0.86, blue: 0.10, alpha: 0.5)
+        // solid colours: PDF files don't keep a highlight's transparency, so a see-through colour looks
+        // different after every save. These are the old half-transparent colours, already mixed with white.
+        case .essential:   return NSColor(srgbRed: 0.98, green: 0.665, blue: 0.725, alpha: 1)
+        case .interesting: return NSColor(srgbRed: 1.00, green: 0.93, blue: 0.55, alpha: 1)
         }
+    }
+    /// Highlights saved before the colours went solid show at full strength; this gives them today's colour.
+    /// (On screen only, until the PDF is next saved.)
+    static func refreshColor(_ a: PDFAnnotation) {
+        guard (a.type ?? "").replacingOccurrences(of: "/", with: "") == "Highlight",
+              let c = a.color.usingColorSpace(.sRGB) else { return }
+        func near(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> Bool {
+            abs(c.redComponent - r) < 0.02 && abs(c.greenComponent - g) < 0.02 && abs(c.blueComponent - b) < 0.02
+        }
+        if near(1, 0.86, 0.10) { a.color = interesting.nsColor }
+        else if near(0.96, 0.33, 0.45) { a.color = essential.nsColor }
     }
     /// Highlights, underlines etc.: yellow → Interesting, other colours → Essential. Notes (sticky notes) have no level.
     static func of(_ a: PDFAnnotation) -> HighlightLevel? {
@@ -1156,6 +1271,8 @@ final class HighlightingPDFView: PDFView {
 }
 
 final class Viewer: ObservableObject {
+    /// the app's one viewer, so menu commands and background work can reach it
+    private(set) static weak var current: Viewer?
     let pdfView: HighlightingPDFView = {
         let v = HighlightingPDFView()
         v.autoScales = false   // we manage zoom ourselves so a pinch-zoom sticks
@@ -1193,6 +1310,7 @@ final class Viewer: ObservableObject {
     @Published private(set) var docGen = 0
 
     init() {
+        Viewer.current = self
         let nc = NotificationCenter.default
         // Any zoom we didn't set ourselves came from the user: remember it.
         observers.append(nc.addObserver(forName: .PDFViewScaleChanged, object: pdfView, queue: nil) { [weak self] _ in
@@ -1256,10 +1374,22 @@ final class Viewer: ObservableObject {
     /// Called as you type; the PDF is saved a moment after you stop.
     func updateComment(_ note: MarginNote, _ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (note.annotation.contents ?? "") != t else { return }
-        note.annotation.contents = t
+        let parts = BookMarks.splitContents(note.annotation.contents ?? "")
+        guard parts.note != t else { return }
+        note.annotation.contents = BookMarks.joinContents(note: t, quote: parts.quote)
         note.annotation.modificationDate = Date()
         markUnsaved(after: 1.5)
+    }
+
+    /// The Edit button on a photo highlight: corrects the text read from the page. Empty goes back to what was read.
+    func updateQuote(_ note: MarginNote, _ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = BookMarks.splitContents(note.annotation.contents ?? "")
+        guard (parts.quote ?? "") != t else { return }
+        note.annotation.contents = BookMarks.joinContents(note: parts.note, quote: t)
+        note.annotation.modificationDate = Date()
+        markUnsaved(after: 1.5)
+        refreshNotes()
     }
 
     /// "About this paper": kept in a note on page 1 of the PDF; removed when emptied.
@@ -1293,9 +1423,11 @@ final class Viewer: ObservableObject {
 
     /// Make a highlight Essential or Interesting (changes its colour in the PDF).
     func setLevel(_ ann: PDFAnnotation, _ level: HighlightLevel) {
-        guard HighlightLevel.of(ann) != nil, HighlightLevel.of(ann) != level else { return }
+        guard let before = HighlightLevel.of(ann), before != level else { return }
         ann.color = level.nsColor
         ann.modificationDate = Date()
+        pdfView.undoManager?.registerUndo(withTarget: self) { v in v.setLevel(ann, before) }
+        pdfView.undoManager?.setActionName("Mark as \(level.name)")
         markUnsaved()
         refreshNotes()
     }
@@ -1346,6 +1478,7 @@ final class Viewer: ObservableObject {
 
     func refreshNotes() {
         notes = pdfView.document.map(Marginalia.collect) ?? []
+        notes.forEach { HighlightLevel.refreshColor($0.annotation) }
     }
 
     @discardableResult
@@ -1364,10 +1497,20 @@ final class Viewer: ObservableObject {
             }
         }
         for page in order {
-            guard let rects = byPage[page], let first = rects.first else { continue }
+            guard var rects = byPage[page] else { continue }
+            // touching an existing highlight extends it, keeping its note and level, instead of stacking a second one
+            let touched = page.annotations.filter { old in
+                (old.type ?? "").replacingOccurrences(of: "/", with: "") == "Highlight"
+                    && Marginalia.lineRects(old).contains { o in rects.contains { $0.intersects(o) } }
+            }
+            for old in touched { rects += Marginalia.lineRects(old) }
+            rects = BookMarks.mergeLines(rects)
+            guard let first = rects.first else { continue }
             let box = rects.dropFirst().reduce(first) { $0.union($1) }
             let ann = PDFAnnotation(bounds: box, forType: .highlight, withProperties: nil)
-            ann.color = level.nsColor
+            ann.color = touched.compactMap { HighlightLevel.of($0) }.first?.nsColor ?? level.nsColor
+            let kept = touched.map { BookMarks.splitContents($0.contents ?? "").note }.filter { !$0.isEmpty }
+            if !kept.isEmpty { ann.contents = kept.joined(separator: "\n") }
             ann.quadrilateralPoints = rects.flatMap { r -> [NSValue] in
                 let x0 = r.minX - box.minX, x1 = r.maxX - box.minX
                 let y0 = r.minY - box.minY, y1 = r.maxY - box.minY
@@ -1376,7 +1519,7 @@ final class Viewer: ObservableObject {
             }
             ann.userName = NSFullUserName()
             ann.modificationDate = Date()
-            page.addAnnotation(ann)
+            swapHighlights(on: page, remove: touched, add: [ann], name: "Highlight")
             made.append(ann)
         }
         pdfView.clearSelection()
@@ -1386,9 +1529,28 @@ final class Viewer: ObservableObject {
     }
 
     func removeHighlight(_ ann: PDFAnnotation) {
-        ann.page?.removeAnnotation(ann)
+        guard let page = ann.page else { return }
+        swapHighlights(on: page, remove: [ann], add: [], name: "Remove Highlight")
+    }
+
+    /// Takes highlights off a page and puts others on, and records the reverse, so Undo and Redo work.
+    private func swapHighlights(on page: PDFPage, remove: [PDFAnnotation], add: [PDFAnnotation], name: String) {
+        remove.forEach { page.removeAnnotation($0) }
+        add.forEach { page.addAnnotation($0) }
+        pdfView.undoManager?.registerUndo(withTarget: self) { v in
+            v.swapHighlights(on: page, remove: add, add: remove, name: name)
+        }
+        pdfView.undoManager?.setActionName(name)
         markUnsaved()
         refreshNotes()
+    }
+
+    /// Edit ▸ Undo / Redo: for the note box you're typing in if there is one, otherwise for highlights.
+    func undoLast() {
+        if !NSApp.sendAction(Selector(("undo:")), to: nil, from: nil) { pdfView.undoManager?.undo() }
+    }
+    func redoLast() {
+        if !NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) { pdfView.undoManager?.redo() }
     }
 
     private func markUnsaved(after delay: Double = 0.8) {
@@ -1420,6 +1582,43 @@ final class Viewer: ObservableObject {
         }
     }
 
+    /// File ▸ Set Printed Page Number…: fixes the number cited for the page on screen. On an ordinary PDF the
+    /// pages after it count up from it; on a photo book only this page changes, and it moves to its place.
+    func askPageNumber() {
+        guard let doc = pdfView.document, let page = pdfView.currentPage else { return }
+        let index = doc.index(for: page)
+        let photo = PageLabels.isPhotoPage(page)
+        let alert = NSAlert()
+        alert.messageText = "Printed page number"
+        alert.informativeText = photo ? "The number printed on this page." : "The number printed on this page. The pages after it will count up from it."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        field.stringValue = PageLabels.label(of: page, index: index)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let label = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty else { return }
+        if photo {
+            PageLabels.set(label, on: page, photo: true)
+            if let rank = BookPages.rank(label) {
+                doc.removePage(at: index)
+                let ranks = (0..<doc.pageCount).map { i in doc.page(at: i).flatMap(PageLabels.marked).flatMap(BookPages.rank) }
+                doc.insert(page, at: BookPages.insertionIndex(rank: rank, among: ranks))
+                BookPhotos.keepSummaryOnFirstPage(doc)
+                pdfView.go(to: page)
+            }
+        } else {
+            for i in index..<doc.pageCount {
+                guard let p = doc.page(at: i), let l = i == index ? label : BookPages.counted(label, by: i - index) else { continue }
+                PageLabels.set(l, on: p, photo: false)
+            }
+        }
+        markUnsaved(after: 0.1)
+        refreshNotes()
+    }
+
     private func applyScale() {
         guard pdfView.document != nil else { return }
         settingScale = true
@@ -1434,6 +1633,7 @@ final class Viewer: ObservableObject {
     }
 
     func show(path: String, terms: [String], page: Int, wholeWords: Bool = true, note: NoteTarget? = nil) {
+        pdfView.undoManager?.removeAllActions(withTarget: self)     // a load makes fresh pages; old undo steps no longer apply
         flushSave()
         gen += 1
         let g = gen
@@ -1737,6 +1937,7 @@ final class Library: ObservableObject {
     static let myNotesScope = "\u{1}mynotes"
     /// the "Search in ▸ Recently Edited" choice: papers you've highlighted or written notes in, newest first
     static let recentScope = "\u{1}recent"
+    static let addedScope = "\u{1}added"
 
     @Published var query = "" { didSet { if query != oldValue { scheduleSearch() } } }
     @Published private(set) var results: [Hit] = []
@@ -1766,6 +1967,10 @@ final class Library: ObservableObject {
     /// the "Add to Library" card being shown (nil file = a book or chapter without a PDF)
     @Published var addRequest: AddRequest?
     private var addQueue: [URL?] = []
+    /// the batch of book photos being worked through (a new batch waits for it)
+    private var photoTask: Task<Void, Never>?
+    /// photos already being worked on, so none is read twice
+    private var photoQueued = Set<String>()
     /// short confirmation shown in the status bar ("Copied [@key]")
     @Published private(set) var flash: String?
     private var flashGen = 0
@@ -1802,8 +2007,11 @@ final class Library: ObservableObject {
         // pick up edits to library.bib (or new reference .bib files) whenever the app comes to the front
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.reloadBib()
+            self?.checkPhotoInbox()
             self?.syncOwnNotesSoon()   // what you wrote in your paper notes since
         }
+        // new photos are picked up on their own while the app is open
+        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.checkPhotoInbox() }
     }
 
     private func noDetailsAlert() {
@@ -1998,11 +2206,11 @@ final class Library: ObservableObject {
         if !files.isEmpty { add(files) }
     }
 
-    func showFlash(_ message: String) {
+    func showFlash(_ message: String, seconds: Double = 3) {
         flashGen += 1
         let g = flashGen
         flash = message
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if g == self.flashGen { self.flash = nil } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { if g == self.flashGen { self.flash = nil } }
     }
 
     private static func onUnpluggedVolume(_ path: String) -> Bool {
@@ -2033,7 +2241,7 @@ final class Library: ObservableObject {
         panel.allowedContentTypes = [.pdf]
         panel.prompt = "Add"
         panel.message = "Choose PDFs to add to your library"
-        if panel.runModal() == .OK { requestAdd(panel.urls) }
+        if panel.runModal() == .OK { handleDropped(panel.urls) }
     }
 
     /// Show the Add card for each file in turn (nil = book/chapter without a PDF).
@@ -2048,32 +2256,34 @@ final class Library: ObservableObject {
         DispatchQueue.main.async { self.addRequest = AddRequest(file: f) }
     }
 
-    /// Dropped onto the window: folders become searchable; PDFs already in the bibliography are just
-    /// indexed; new PDFs get the Add card (or, for many at once, the choice of just searching them).
+    /// Dropped onto the window: photos become book pages; folders become searchable; PDFs already in the
+    /// bibliography are just indexed; new PDFs get the Add card (or, for many at once, the choice of just
+    /// searching them).
     func handleDropped(_ urls: [URL]) {
-        var folders: [URL] = [], known: [URL] = [], new: [URL] = []
+        var folders: [URL] = [], known: [URL] = [], new: [URL] = [], photos: [URL] = []
         for u in urls {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir) else { continue }
-            if isDir.boolValue { folders.append(u) }
+            if isDir.boolValue {
+                // a folder of photos and no PDFs is a batch of book pages
+                let inside = (try? FileManager.default.contentsOfDirectory(at: u, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
+                let images = inside.filter(Library.isPhoto)
+                if !images.isEmpty, Library.findPDFs(in: u).isEmpty { photos += images } else { folders.append(u) }
+            }
+            else if Library.isPhoto(u) { photos.append(u) }
             else if u.pathExtension.lowercased() == "pdf" {
                 if bib.entry(forPath: u.standardizedFileURL.path) != nil { known.append(u) } else { new.append(u) }
             }
         }
         if !folders.isEmpty || !known.isEmpty { add(folders + known) }
+        if !photos.isEmpty { addPhotos(photos) }
+        // everything imported gets its details: a folder stays where it is, and its PDFs are looked up in the background
+        let inFolders = folders.flatMap { Library.findPDFs(in: $0) }
+        if !inFolders.isEmpty { lookUpDetails(inFolders, inPlace: true) }
         guard !new.isEmpty else { return }
         if new.count > 3 {
-            let alert = NSAlert()
-            alert.messageText = "Add \(new.count) PDFs to your library?"
-            alert.informativeText = "Adding looks up each paper's citation details and moves it into Papers/Library, one card at a time. Or just make them searchable where they are."
-            alert.addButton(withTitle: "Add to Library")
-            alert.addButton(withTitle: "Just Search Them")
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn: requestAdd(new)
-            case .alertSecondButtonReturn: add(new)
-            default: break
-            }
+            add(new)        // searchable straight away; filed in Papers/Library as their details are found
+            lookUpDetails(new, inPlace: false)
         } else {
             requestAdd(new)
         }
@@ -2081,10 +2291,13 @@ final class Library: ObservableObject {
 
     /// Save a confirmed entry: move/copy the PDF to Library/<key>.pdf and append to library.bib.
     @discardableResult
-    func addToLibrary(type: String, key: String, fields: [String: String], file: URL?, move: Bool) -> Bool {
+    func addToLibrary(type: String, key: String, fields: [String: String], file: URL?, move: Bool,
+                      inPlace: Bool = false, quiet: Bool = false) -> Bool {
         let fm = FileManager.default
         var dest: String?
-        if let src = file?.standardizedFileURL {
+        if inPlace, let src = file?.standardizedFileURL {
+            dest = src.path
+        } else if let src = file?.standardizedFileURL {
             let dir = Paths.libraryFolder
             var d = dir + "/" + key + ".pdf"
             if fm.fileExists(atPath: d) && d != src.path { d = dir + "/" + key + "-2.pdf" }
@@ -2113,6 +2326,7 @@ final class Library: ObservableObject {
             return false
         }
         if let e = BibParser.parse(text, inLibrary: true).first { bib = BibIndex(entries: bib.entries + [e]) }
+        if quiet { return true }      // a batch reloads and rescans once, at the end
         reloadBib(force: true)
         refresh()   // index the new file and forget its old location
         showFlash("Added @\(key) to your library")
@@ -2413,7 +2627,7 @@ final class Library: ObservableObject {
             self.docCount = n
             self.folders = f
             self.indexedPaths = paths
-            if let s = self.scope, s != Library.myNotesScope, s != Library.recentScope, !f.contains(where: { $0.path == s }) { self.scope = nil }
+            if let s = self.scope, s != Library.myNotesScope, s != Library.recentScope, s != Library.addedScope, !f.contains(where: { $0.path == s }) { self.scope = nil }
         }
     }
 
@@ -2507,7 +2721,8 @@ final class Library: ObservableObject {
         let g = searchGen
         let q = query
         let myNotes = self.scope == Library.myNotesScope
-        let recent = self.scope == Library.recentScope
+        let added = self.scope == Library.addedScope
+        let recent = self.scope == Library.recentScope || added
         let scope = (!myNotes && !recent) ? self.scope : nil
         let bib = self.bib
         let indexed = self.indexedPaths
@@ -2515,8 +2730,8 @@ final class Library: ObservableObject {
             let (fts, terms) = Library.parse(q)
             let empty = q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if recent {
-                // papers you've worked on, newest first; typing searches just those
-                let rec = self.reader.recentFiles()
+                // papers you've worked on (or added), newest first; typing searches just those
+                let rec = added ? self.reader.addedFiles() : self.reader.recentFiles()
                 var hits: [Hit]
                 if empty {
                     hits = rec.map { Hit(id: $0.id, path: $0.path, page: 0, badge: Library.when($0.time), snippet: nil) }
@@ -3222,6 +3437,133 @@ enum SelfTest {
             let present = withFile.filter { FileManager.default.fileExists(atPath: $0.file!) }
             print("SELFTEST file \(p): \(fs.count) entries, \(withFile.count) with a PDF path, \(present.count) of those exist; first: \(fs.first.map { $0.shortCite + " " + $0.title } ?? "-")")
         }
+        photoBook()
+    }
+
+    /// Book pages from photos, end to end, with made-up photos: reading, page numbers, the hidden markers, saving.
+    static func photoBook() {
+        let r = BookPages.self
+        func line(_ t: String, _ y: CGFloat) -> OCRLine { OCRLine(text: t, box: CGRect(x: 0.1, y: y, width: 0.8, height: 0.02), words: []) }
+        print("SELFTEST page numbers: \(r.printedNumber([line("143", 0.05)], cropped: true) ?? "-") \(r.printedNumber([line("42 THE BOOK TITLE", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("CONTRIBUTORS vii", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("12 Ibid., 46.", 0.05)], cropped: true) ?? "none") \(r.fillGaps(["142", nil, "144"]).map { $0 ?? "?" }) (expect 143 42 vii none [142, 143, 144])")
+        print("SELFTEST photo isbn: \(r.isbns(in: "ISBN 978-0-415-99873-4 (pbk)")) bad=\(r.isbns(in: "ISBN 978-0-415-99873-5")) ten=\(r.isbn13("0-415-99873-5") ?? "-") (expect [9780415998734] [] 9780415998734)")
+        print("SELFTEST title check: \(r.titleAppears("The Aesthetics of Failure", in: "Aesthetics of Failure, by Kim Cascone")) \(r.titleAppears("Protein Folding Models", in: "The aesthetics of failure")) (expect true false)")
+        print("SELFTEST head match: \(r.headMatches("THE POETICS OF SPACE", title: "The Poetics of Space: A Study")) \(r.headMatches("Introduction", title: "The Poetics of Space")) (expect true false)")
+
+        let fm = FileManager.default
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("pdfsearch-selftest-" + UUID().uuidString)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        // a white page, slightly turned, on a dark table
+        func fakePhoto(_ name: String, head: String?, body: [String], number: String?, marks: Bool = false) -> URL? {
+            let w = 1800, h = 2400
+            guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+                  let c = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            c.setFillColor(CGColor(red: 0.13, green: 0.12, blue: 0.11, alpha: 1))
+            c.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            c.translateBy(x: 900, y: 1200)
+            c.rotate(by: 0.03)
+            c.setFillColor(CGColor(red: 1, green: 1, blue: 0.98, alpha: 1))
+            let page = CGRect(x: -650, y: -950, width: 1300, height: 1900)
+            c.fill(page)
+            let font = CTFontCreateWithName("Times New Roman" as CFString, 46, nil)
+            func draw(_ s: String, _ x: CGFloat, _ y: CGFloat) {
+                let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): font,
+                                                            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(red: 0, green: 0, blue: 0, alpha: 1)]
+                c.textPosition = CGPoint(x: x, y: y)
+                CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs) as CFAttributedString), c)
+            }
+            if let t = head { draw(t, -420, 860) }
+            for (i, t) in body.enumerated() { draw(t, -540, 740 - CGFloat(i) * 72) }
+            if let n = number { draw(n, -20, -880) }
+            if marks {      // lines 3 to 5: a yellow streak in the margin, and a pen line under each
+                c.setFillColor(CGColor(red: 0.97, green: 0.93, blue: 0.2, alpha: 1))
+                c.fill(CGRect(x: -620, y: 740 - 4 * 72 - 10, width: 50, height: 3 * 72 + 30))
+                c.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+                for i in 2...4 { c.fill(CGRect(x: -540, y: 740 - CGFloat(i) * 72 - 14, width: 860, height: 4)) }
+            }
+            guard let image = c.makeImage() else { return nil }
+            let url = dir.appendingPathComponent(name)
+            guard let out = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(out, image, nil)
+            return CGImageDestinationFinalize(out) ? url : nil
+        }
+        let words = ["the imaginary is what enables practices", "through making sense of them together", "people imagine their social existence",
+                     "how things go on between them and others", "the expectations that are normally met", "and the deeper images underlying these"]
+        func page(_ name: String, _ n: String) -> PagePhoto? {
+            guard let u = fakePhoto(name, head: "MODERN SOCIAL IMAGINARIES", body: words + words + words, number: n) else { return nil }
+            return BookPhotos.read(u).first
+        }
+        guard let p42 = page("a.jpg", "42"), let p41 = page("b.jpg", "41") else { print("SELFTEST photo book: FAILED to read a photo"); return }
+        let found = BookPages.printedNumber(p42.lines, cropped: p42.cropped) ?? "-"
+        print("SELFTEST photo read: \(p42.lines.count) lines, \(p42.text.count) characters, cropped=\(p42.cropped), number=\(found), heads=\(BookPages.runningHeads(p42.lines, cropped: p42.cropped)), \(p42.jpeg.count / 1024) KB (expect about 20 lines, cropped=true, number=42, head MODERN SOCIAL IMAGINARIES)")
+        if let u = fakePhoto("isbn.jpg", head: nil, body: ["Copyright 2004 Duke University Press", "ISBN 978-0-415-99873-4 (pbk)"], number: nil) {
+            print("SELFTEST photo ISBN read: \(BookPhotos.read(u).first?.isbns ?? []) (expect [9780415998734])")
+        }
+        let book = dir.appendingPathComponent("book.pdf")
+        let a = BookPhotos.add([(photo: p42, label: "42")], to: book)
+        let b = BookPhotos.add([(photo: p41, label: "41"), (photo: p42, label: "cover")], to: book)
+        let c = BookPhotos.add([(photo: p42, label: "42")], to: book)      // a second photo of p. 42 replaces the first
+        guard let doc = PDFDocument(url: book) else { print("SELFTEST photo book: FAILED to open the PDF (\(String(describing: a)) \(String(describing: b)) \(String(describing: c)))"); return }
+        let labels = (0..<doc.pageCount).compactMap { doc.page(at: $0) }.enumerated().map { PageLabels.label(of: $1, index: $0) }
+        print("SELFTEST photo book labels: \(labels) (expect [cover, 41, 42])")
+        print("SELFTEST photo book: \(doc.findString("imaginary", withOptions: .caseInsensitive).count) matches for a word in the picture, text=\((doc.page(at: 2)?.string ?? "").prefix(50).replacingOccurrences(of: "\n", with: " / "))…, \((try? fm.attributesOfItem(atPath: book.path))?[.size] as? Int ?? 0) bytes")
+        print("SELFTEST photo thumbnail page: \(doc.page(at: 0).map { PageLabels.marked($0) ?? "-" } ?? "-"), photo book=\(BookPhotos.isPhotoBook(book)), cover=\(BookPhotos.hasCover(book)) (expect cover true true)")
+        // a highlight on a photo page, through a save: the marker survives and the citation uses the printed number
+        if let target = doc.page(at: 2), let sel = doc.findString("imaginary", withOptions: .caseInsensitive).first(where: { $0.pages.first === target }) {
+            let box = sel.bounds(for: target)
+            let h = PDFAnnotation(bounds: box, forType: .highlight, withProperties: nil)
+            h.quadrilateralPoints = [NSPoint(x: 0, y: box.height), NSPoint(x: box.width, y: box.height), NSPoint(x: 0, y: 0), NSPoint(x: box.width, y: 0)].map { NSValue(point: $0) }
+            h.contents = "a note"
+            target.addAnnotation(h)
+            let saved = dir.appendingPathComponent("saved.pdf")
+            let ok = doc.write(to: saved)
+            if let again = PDFDocument(url: saved) {
+                let n = Marginalia.collect(again).first
+                let marks = again.page(at: 2)?.annotations.filter(Marginalia.isMarkup).count ?? -1
+                let hidden = again.page(at: 2)?.annotations.first(where: PageLabels.isMarker)?.shouldDisplay
+                print("SELFTEST photo highlight: saved=\(ok) page=\(n?.pageLabel ?? "-") quote=\(n?.quote ?? "-") markup=\(marks) markerShown=\(hidden.map(String.init(describing:)) ?? "-") (expect true 42 imaginary 1 false)")
+            }
+        } else { print("SELFTEST photo highlight: FAILED, the word wasn't found on page 42") }
+        // a yellow streak beside underlined lines becomes one Interesting highlight
+        if let u = fakePhoto("marked.jpg", head: "MODERN SOCIAL IMAGINARIES", body: words + words + words, number: "43", marks: true),
+           let marked = BookPhotos.read(u).first {
+            let file = dir.appendingPathComponent("marked.pdf")
+            _ = BookPhotos.add([(photo: marked, label: "43")], to: file)
+            let n = PDFDocument(url: file).map(Marginalia.collect)?.first
+            print("SELFTEST photo marks: \(marked.passages.count) passage, \(marked.passages.first?.boxes.count ?? 0) lines, level=\(n?.level?.name ?? "-"), page=\(n?.pageLabel ?? "-"), quote=\((n?.quote ?? "-").prefix(40))…, note=[\(n?.comment ?? "-")] (expect 1 passage, 3 lines, Interesting, 43, people imagine…, empty note)")
+            if let doc3 = PDFDocument(url: file), let a = Marginalia.collect(doc3).first?.annotation {
+                a.contents = BookMarks.joinContents(note: "my note", quote: "the corrected words")
+                let saved = dir.appendingPathComponent("edited.pdf")
+                _ = doc3.write(to: saved)
+                let e = PDFDocument(url: saved).map(Marginalia.collect)?.first
+                print("SELFTEST photo edited quote: quote=\(e?.quote ?? "-") note=\(e?.comment ?? "-") (expect the corrected words, my note)")
+            }
+        }
+        // words narrower or wider than the font's own shape must still come back whole
+        let squeezed = OCRLine(text: "pharmakon hypomnemata", box: CGRect(x: 0.1, y: 0.5, width: 0.5, height: 0.03),
+                               words: [OCRWord(text: "pharmakon", box: CGRect(x: 0.1, y: 0.5, width: 0.1, height: 0.03)),
+                                       OCRWord(text: "hypomnemata", box: CGRect(x: 0.25, y: 0.5, width: 0.4, height: 0.03))])
+        let tight = PagePhoto(source: dir, jpeg: p41.jpeg, lines: [squeezed], cropped: true, isbns: [])
+        let tightText = BookPhotos.pageData(tight).flatMap { PDFDocument(data: $0)?.page(at: 0)?.string } ?? ""
+        print("SELFTEST photo word spacing: \(tightText.trimmingCharacters(in: .whitespacesAndNewlines)) (expect pharmakon hypomnemata)")
+        // the inbox: a photo moved to Done never replaces one already there
+        let shot = dir.appendingPathComponent("IMG_1.jpg"), done = dir.appendingPathComponent("Done").path
+        fm.createFile(atPath: shot.path, contents: Data("one".utf8))
+        let m1 = BookPhotos.move(shot, into: done)
+        fm.createFile(atPath: shot.path, contents: Data("two".utf8))
+        let m2 = BookPhotos.move(shot, into: done)
+        print("SELFTEST photo inbox: moved \(m1) \(m2), Done holds \(((try? fm.contentsOfDirectory(atPath: done)) ?? []).sorted()), left behind=\(fm.fileExists(atPath: shot.path)) (expect true true [IMG_1 2.jpg, IMG_1.jpg] false)")
+        print("SELFTEST obsidian link: \(Marginalia.obsidianLink(note: "/Volumes/R/My Vault/Literature/@smith2020a.md", vault: "/Volumes/R/My Vault")) (expect vault=My%20Vault&file=Literature%2F%40smith2020a)")
+        // the marker on an ordinary PDF (how page numbers get fixed on existing papers)
+        if let doc2 = PDFDocument(data: BookPhotos.pageData(p41) ?? Data()), let only = doc2.page(at: 0) {
+            PageLabels.set("177", on: only, photo: false)
+            PageLabels.set("178", on: only, photo: false)
+            let file = dir.appendingPathComponent("plain.pdf")
+            _ = doc2.write(to: file)
+            let back = PDFDocument(url: file)?.page(at: 0)
+            print("SELFTEST page marker: \(back.map { PageLabels.label(of: $0, index: 0) } ?? "-"), markers=\(back?.annotations.filter(PageLabels.isMarker).count ?? -1) (expect 178, 1)")
+        }
     }
 }
 
@@ -3292,14 +3634,14 @@ enum Marginalia {
         var out: [MarginNote] = []
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }
-            let label = page.label.flatMap { $0.isEmpty ? nil : $0 } ?? String(i + 1)
+            let label = PageLabels.label(of: page, index: i)
             let anns = page.annotations.filter { isMarkup($0) && !isSummary($0) }.sorted { a, b in
                 if abs(a.bounds.maxY - b.bounds.maxY) > 3 { return a.bounds.maxY > b.bounds.maxY }
                 return a.bounds.minX < b.bounds.minX
             }
             for a in anns {
                 out.append(MarginNote(annotation: a, pageIndex: i, pageLabel: label, quote: quote(a, page),
-                                      comment: (a.contents ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                                      comment: BookMarks.splitContents(a.contents ?? "").note.trimmingCharacters(in: .whitespacesAndNewlines),
                                       color: a.color))
             }
         }
@@ -3307,7 +3649,24 @@ enum Marginalia {
     }
 
     /// The text under a highlight, line by line.
+    /// A highlight's line boxes in page coordinates.
+    static func lineRects(_ a: PDFAnnotation) -> [CGRect] {
+        guard let q = a.quadrilateralPoints, q.count >= 4 else { return [a.bounds] }
+        var out: [CGRect] = []
+        for k in stride(from: 0, to: q.count - 3, by: 4) {
+            let pts = q[k..<(k + 4)].map { $0.pointValue }
+            let xs = pts.map { $0.x }, ys = pts.map { $0.y }
+            if let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() {
+                out.append(CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+            }
+        }
+        // PDFKit keeps these relative to the annotation; some files use page coordinates
+        let shifted = out.map { $0.offsetBy(dx: a.bounds.minX, dy: a.bounds.minY) }
+        return shifted.allSatisfy { a.bounds.insetBy(dx: -2, dy: -2).contains($0) } ? shifted : out
+    }
+
     static func quote(_ a: PDFAnnotation, _ page: PDFPage) -> String {
+        if let edited = BookMarks.splitContents(a.contents ?? "").quote { return edited }
         let t = (a.type ?? "").replacingOccurrences(of: "/", with: "")
         if t == "Text" || t == "FreeText" { return "" }
         var rects: [CGRect] = []
@@ -3406,23 +3765,32 @@ enum Marginalia {
         return folder + "/" + noteFileName(key: entry?.key ?? stem)
     }
 
-    /// true if this folder is inside an Obsidian vault (some folder above it holds `.obsidian`)
-    static func inVault(_ folder: String) -> Bool {
+    /// the Obsidian vault this folder is inside (the nearest folder above it holding `.obsidian`), if any
+    static func vaultRoot(_ folder: String) -> String? {
         var dir = folder
         while dir.count > 1 {
-            if FileManager.default.fileExists(atPath: dir + "/.obsidian") { return true }
+            if FileManager.default.fileExists(atPath: dir + "/.obsidian") { return dir }
             dir = (dir as NSString).deletingLastPathComponent
         }
-        return false
+        return nil
+    }
+    static func inVault(_ folder: String) -> Bool { vaultRoot(folder) != nil }
+
+    /// Opens a note by vault name and path inside it. `open?path=` starts Obsidian but doesn't reliably go to the note.
+    static func obsidianLink(note path: String, vault root: String) -> String? {
+        guard path.hasPrefix(root + "/") else { return nil }
+        let inside = (String(path.dropFirst(root.count + 1)) as NSString).deletingPathExtension
+        guard let v = (root as NSString).lastPathComponent.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+              let f = inside.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        return "obsidian://open?vault=\(v)&file=\(f)"
     }
     /// are paper notes kept in an Obsidian vault? (labels say "Open in Obsidian" then)
     static var notesInVault: Bool { inVault(folder) }
 
     /// Open a paper note: in Obsidian when it's inside an Obsidian vault, otherwise in the default Markdown app.
     static func openNote(_ path: String) {
-        let inVault = inVault((path as NSString).deletingLastPathComponent)
-        if inVault, let enc = path.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
-           let url = URL(string: "obsidian://open?path=" + enc),
+        if let root = vaultRoot((path as NSString).deletingLastPathComponent),
+           let link = obsidianLink(note: path, vault: root), let url = URL(string: link),
            NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
             NSWorkspace.shared.open(url)
         } else {
@@ -3615,7 +3983,12 @@ struct NoteCard: View {
     @ObservedObject var viewer: Viewer
     @State private var text = ""
     @State private var loaded = false
+    @State private var editingQuote = false
+    @State private var quoteText = ""
     @FocusState private var focused: Bool
+
+    /// a highlight on a photographed page: its text was read from the picture, so it can be corrected
+    private var fromPhoto: Bool { note.annotation.page.map(PageLabels.isPhotoPage) ?? false }
 
     /// rough height for the note box: grows with the text, never huge
     private var boxHeight: CGFloat {
@@ -3640,18 +4013,37 @@ struct NoteCard: View {
                     .buttonStyle(.link)
                     .help("Go to this passage")
                 Spacer()
+                if fromPhoto && !note.quote.isEmpty {
+                    Button {
+                        quoteText = note.quote
+                        editingQuote.toggle()
+                    } label: {
+                        Label(editingQuote ? "Done" : "Edit", systemImage: editingQuote ? "checkmark" : "pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Correct the text read from the photo. It saves as you type.")
+                }
                 Button(role: .destructive) { viewer.removeHighlight(note.annotation) } label: {
                     Label("Remove", systemImage: "trash")
                 }
                 .buttonStyle(.borderless)
                 .help("Remove this highlight and its note")
             }
-            if !note.quote.isEmpty {
+            if editingQuote {
+                TextEditor(text: $quoteText)
+                    .font(.callout)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .frame(height: min(260, max(70, CGFloat(quoteText.count / 34 + 2) * 16)))
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 1))
+                    .onChange(of: quoteText) { t in viewer.updateQuote(note, t) }
+            } else if !note.quote.isEmpty {
                 Text(note.quote)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .lineLimit(5)
-                    .onTapGesture { viewer.reveal(note) }
+                    .lineLimit(fromPhoto ? nil : 5)
+                    .textSelection(.enabled)
             }
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $text)
@@ -4195,6 +4587,1032 @@ struct AddPaperView: View {
     }
 }
 
+// MARK: - Book pages from photos
+
+/// One word or line read from a photo. Boxes are 0…1 of the image, measured from its bottom-left corner.
+struct OCRWord { let text: String; let box: CGRect }
+struct OCRLine { let text: String; let box: CGRect; let words: [OCRWord] }
+
+/// The rules for reading a photographed page, kept apart from Apple's frameworks so --selftest can check them.
+enum BookPages {
+    static let noNumber = "?"
+    static let cover = "cover"
+    static let front = "front"
+
+    /// "xiv" → 14. Lower case only, or ordinary capitalised words would count.
+    static func roman(_ s: String) -> Int? {
+        guard !s.isEmpty, s.count <= 8, s.allSatisfy({ "ivxlc".contains($0) }) else { return nil }
+        let value: [Character: Int] = ["i": 1, "v": 5, "x": 10, "l": 50, "c": 100]
+        let v = s.map { value[$0] ?? 0 }
+        var total = 0
+        for i in v.indices { total += (i + 1 < v.count && v[i] < v[i + 1]) ? -v[i] : v[i] }
+        guard total > 0, romanText(total) == s else { return nil }
+        return total
+    }
+    static func romanText(_ n: Int) -> String {
+        var left = n, out = ""
+        for (v, t) in [(100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")] {
+            while left >= v { out += t; left -= v }
+        }
+        return out
+    }
+    private static func arabic(_ s: String) -> Int? {
+        guard !s.isEmpty, s.count <= 4, s.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(s), n >= 1, n < 3000 else { return nil }
+        return n
+    }
+    /// Where a page belongs in a book: cover, front matter, roman pages, then numbered pages. nil = unknown.
+    static func rank(_ label: String) -> Double? {
+        if label == cover { return -3 }
+        if label == front { return -2 }
+        if let n = arabic(label) { return Double(n) }
+        if let n = roman(label) { return -1 + Double(n) / 10_000 }
+        return nil
+    }
+    /// The page number `steps` pages after this one (for renumbering): "12" → "13", "ix" → "x".
+    static func counted(_ label: String, by steps: Int) -> String? {
+        if let n = arabic(label) { return String(n + steps) }
+        if let n = roman(label) { return romanText(n + steps) }
+        return nil
+    }
+
+    /// The number printed on a page: on its own in the top or bottom line, or at either end of a running head.
+    /// `cropped` means the photo was trimmed to the page, so "near the edge" can be measured.
+    static func printedNumber(_ lines: [OCRLine], cropped: Bool) -> String? {
+        let ordered = lines.sorted { $0.box.midY > $1.box.midY }
+        func nearEdge(_ l: OCRLine, top: Bool) -> Bool {
+            !cropped || (top ? l.box.midY >= 0.87 : l.box.midY <= 0.13)
+        }
+        let top = ordered.prefix(2).filter { nearEdge($0, top: true) }
+        let bottom = ordered.suffix(2).reversed().filter { nearEdge($0, top: false) }
+        func clean(_ s: String) -> String { s.trimmingCharacters(in: CharacterSet(charactersIn: " .,:;·•-–—|[]()\t")) }
+        // a number like 1984 at the foot of a copyright page is a year, not a page
+        func folio(_ s: String) -> Bool { (arabic(s).map { $0 < 1500 } ?? false) || roman(s) != nil }
+        for l in top + bottom {
+            let t = clean(l.text)
+            if folio(t) { return t }
+        }
+        for (group, strict) in [(Array(top), false), (Array(bottom), true)] {
+            for l in group {
+                let parts = clean(l.text).split(whereSeparator: { $0.isWhitespace }).map(String.init)
+                guard parts.count >= 2, parts.count <= 9 else { continue }
+                for (n, rest) in [(parts[parts.count - 1], Array(parts.dropLast())), (parts[0], Array(parts.dropFirst()))] {
+                    if folio(n), runningHead(rest, strict: strict) { return n }
+                }
+            }
+        }
+        return nil
+    }
+    /// Do these words look like a running head rather than a sentence, a footnote or "Chapter 3"?
+    private static func runningHead(_ words: [String], strict: Bool) -> Bool {
+        let last = (words.last ?? "").lowercased().trimmingCharacters(in: .punctuationCharacters)
+        if ["chapter", "part", "section", "volume", "book", "figure", "fig", "table", "plate", "see"].contains(last) { return false }
+        let letters = words.joined().filter { $0.isLetter }
+        guard letters.count >= 3 else { return false }
+        if letters.filter({ $0.isUppercase }).count * 10 >= letters.count * 7 { return true }
+        if strict { return false }
+        let wordsWithLetters = words.filter { $0.contains(where: { $0.isLetter }) }
+        let capitalised = wordsWithLetters.filter { $0.first(where: { $0.isLetter })?.isUppercase == true }
+        return !wordsWithLetters.isEmpty && (words.first?.first?.isUppercase ?? false) && capitalised.count * 10 >= wordsWithLetters.count * 6
+    }
+
+    /// Lines that could be a running head (a book or chapter title), without any page number.
+    static func runningHeads(_ lines: [OCRLine], cropped: Bool) -> [String] {
+        let ordered = lines.sorted { $0.box.midY > $1.box.midY }
+        var out: [String] = []
+        for l in ordered.prefix(2) where !cropped || l.box.midY >= 0.85 {
+            var parts = l.text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            if let f = parts.first, arabic(f) != nil || roman(f) != nil { parts.removeFirst() }
+            if let f = parts.last, arabic(f) != nil || roman(f) != nil { parts.removeLast() }
+            if !parts.isEmpty { out.append(parts.joined(separator: " ")) }
+        }
+        return out
+    }
+
+    /// Tidy up a run of photos in page order: a misread number between two good ones is corrected, and a missing
+    /// one is filled in only when its neighbours prove what it must be. Anything else stays unknown (nil).
+    static func fillGaps(_ labels: [String?]) -> [String?] {
+        var out = labels
+        func number(_ i: Int) -> Int? { out[i].flatMap(arabic) }
+        if out.count >= 3 {
+            for i in 1..<(out.count - 1) {
+                if let a = number(i - 1), let b = number(i + 1), b - a == 2, number(i) != a + 1 { out[i] = String(a + 1) }
+            }
+        }
+        var i = 0
+        while i < out.count {
+            guard out[i] == nil else { i += 1; continue }
+            var j = i
+            while j < out.count && out[j] == nil { j += 1 }
+            if i > 0, j < out.count, let a = number(i - 1), let b = number(j), b - a == j - i + 1 {
+                for k in i..<j { out[k] = String(a + (k - i) + 1) }
+            }
+            i = j
+        }
+        return out
+    }
+
+    /// Where a page of this rank goes among pages already in the PDF (unknown pages are stepped over).
+    static func insertionIndex(rank: Double, among ranks: [Double?]) -> Int {
+        for (i, r) in ranks.enumerated() {
+            if let r = r, r > rank { return i }
+        }
+        return ranks.count
+    }
+
+    /// A valid ISBN as 13 digits (ISBN-10s are converted), or nil if the check digit is wrong: a misread digit
+    /// must never look up the wrong book.
+    static func isbn13(_ s: String) -> String? {
+        let t = s.filter { $0.isNumber || $0 == "X" || $0 == "x" }.uppercased()
+        if t.count == 13, t.hasPrefix("978") || t.hasPrefix("979") {
+            let d = t.compactMap { $0.wholeNumberValue }
+            guard d.count == 13 else { return nil }
+            let sum = d.enumerated().reduce(0) { $0 + $1.element * ($1.offset % 2 == 0 ? 1 : 3) }
+            return sum % 10 == 0 ? t : nil
+        }
+        guard t.count == 10 else { return nil }
+        let d = t.map { $0 == "X" ? 10 : ($0.wholeNumberValue ?? 0) }
+        if t.dropLast().contains("X") { return nil }
+        let sum = d.enumerated().reduce(0) { $0 + $1.element * (10 - $1.offset) }
+        guard sum % 11 == 0 else { return nil }
+        let body = "978" + t.dropLast()
+        let b = body.compactMap { $0.wholeNumberValue }
+        let check = (10 - b.enumerated().reduce(0) { $0 + $1.element * ($1.offset % 2 == 0 ? 1 : 3) } % 10) % 10
+        return body + String(check)
+    }
+    /// Every valid ISBN printed in some text, as 13 digits. Bare 10-digit numbers only count right after "ISBN".
+    static func isbns(in text: String) -> [String] {
+        guard let re = try? NSRegularExpression(pattern: "(?<![0-9])[0-9][0-9\\- ]{8,15}[0-9Xx](?![0-9])") else { return [] }
+        let ns = text as NSString
+        var out: [String] = []
+        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let s = ns.substring(with: m.range)
+            guard let i = isbn13(s), !out.contains(i) else { continue }
+            let digits = s.filter { $0.isNumber || $0 == "X" || $0 == "x" }
+            if digits.count == 10 {
+                let start = max(0, m.range.location - 24)
+                let before = ns.substring(with: NSRange(location: start, length: m.range.location - start))
+                guard before.lowercased().contains("isbn") else { continue }
+            }
+            out.append(i)
+        }
+        return out
+    }
+    /// The ISBNs in a library.bib `isbn` field, which may hold several separated by spaces.
+    static func isbnList(_ field: String) -> [String] {
+        field.components(separatedBy: CharacterSet(charactersIn: " ,;\n\t")).compactMap(isbn13)
+    }
+
+    /// Did this title come from this PDF? Most of its words must be in the PDF's first pages. It stops a DOI from
+    /// someone else's paper, or a wrong title match, filling in the wrong details with no card to catch it.
+    static func titleAppears(_ title: String, in text: String) -> Bool {
+        let wanted = Set(BibIndex.fold(title.precomposedStringWithCompatibilityMapping).split(separator: " "))
+        let page = Set(BibIndex.fold(text.precomposedStringWithCompatibilityMapping).split(separator: " "))
+        guard !wanted.isEmpty else { return false }
+        return wanted.filter { page.contains($0) }.count * 10 >= wanted.count * 7
+    }
+
+    /// A book's short title, folded for matching: no subtitle, no leading "The".
+    static func shortTitle(_ title: String) -> String {
+        let main = title.components(separatedBy: CharacterSet(charactersIn: ":;")).first ?? title
+        var f = BibIndex.fold(main)
+        for a in ["the ", "a ", "an "] where f.hasPrefix(a) { f = String(f.dropFirst(a.count)); break }
+        return f
+    }
+    /// Is this running head the book's title? Whole title only, so a chapter title can't match by a stray word.
+    static func headMatches(_ head: String, title: String) -> Bool {
+        let t = shortTitle(title), h = shortTitle(head)
+        guard !t.isEmpty else { return false }
+        if h == t { return true }
+        return t.split(separator: " ").count >= 2 && (" " + h + " ").contains(" " + t + " ")
+    }
+    /// The one book that the most running heads point to, or nil if none does or two tie.
+    static func bookForHeads(_ heads: [[String]], books: [(key: String, title: String)]) -> String? {
+        var score: [String: Int] = [:]
+        for page in heads {
+            for b in books where page.contains(where: { headMatches($0, title: b.title) }) { score[b.key, default: 0] += 1 }
+        }
+        guard let best = score.values.max(), score.values.filter({ $0 == best }).count == 1 else { return nil }
+        return score.first { $0.value == best }?.key
+    }
+
+    /// Photos from different books, dropped together: a new ISBN starts a new book, and an unnumbered photo
+    /// just before it (its cover) goes with it. Returns the photos' positions, grouped by book.
+    static func groups(_ shots: [(isbns: [String], numbered: Bool)]) -> [[Int]] {
+        var out: [[Int]] = [], current: [Int] = []
+        var seen = Set<String>()
+        for (i, s) in shots.enumerated() {
+            let new = Set(s.isbns)
+            if !new.isEmpty, !seen.isEmpty, new.isDisjoint(with: seen) {
+                var moved: [Int] = []
+                while let l = current.last, !shots[l].numbered, shots[l].isbns.isEmpty { moved.insert(current.removeLast(), at: 0) }
+                if !current.isEmpty { out.append(current) }
+                current = moved
+                seen = []
+            }
+            current.append(i)
+            seen.formUnion(new)
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
+    }
+
+    /// Labels for one book's photos, in order. The first photo counts as the cover if it has little text, no
+    /// number and no ISBN, and the book has no cover yet. An ISBN page is front matter.
+    static func labels(numbers: [String?], isbnPage: [Bool], characters: [Int], hasCover: Bool) -> [String] {
+        let filled = fillGaps(numbers)
+        return filled.indices.map { i in
+            if let n = filled[i] { return n }
+            if isbnPage[i] { return front }
+            if i == 0 && !hasCover && characters[i] < 400 { return cover }
+            return noNumber
+        }
+    }
+
+    /// The share of the picture a four-cornered shape covers (corners in order, 0…1).
+    static func area(_ p: [CGPoint]) -> Double {
+        guard p.count == 4 else { return 0 }
+        var s = 0.0
+        for i in 0..<4 {
+            let a = p[i], b = p[(i + 1) % 4]
+            s += Double(a.x * b.y - b.x * a.y)
+        }
+        return abs(s) / 2
+    }
+
+    /// The spaces-apart pieces of a line.
+    static func wordRanges(_ s: String) -> [Range<String.Index>] {
+        var out: [Range<String.Index>] = []
+        var start: String.Index?
+        var i = s.startIndex
+        while i < s.endIndex {
+            if s[i].isWhitespace {
+                if let b = start { out.append(b..<i); start = nil }
+            } else if start == nil { start = i }
+            i = s.index(after: i)
+        }
+        if let b = start { out.append(b..<s.endIndex) }
+        return out
+    }
+    /// Boxes for words when the OCR gives only the line's: share the line out by length.
+    static func spread(_ words: [String], across box: CGRect) -> [OCRWord] {
+        let total = words.reduce(0) { $0 + $1.count + 1 }
+        guard total > 0 else { return [] }
+        var x = box.minX
+        return words.map { w in
+            let width = box.width * CGFloat(w.count) / CGFloat(total)
+            defer { x += box.width * CGFloat(w.count + 1) / CGFloat(total) }
+            return OCRWord(text: w, box: CGRect(x: x, y: box.minY, width: width, height: box.height))
+        }
+    }
+
+    /// How a hidden page marker is written inside the PDF.
+    static let markerPrefix = "PDFSearch page: "
+    static let photoMarkerPrefix = "PDFSearch photo page: "
+    static func markerText(_ label: String, photo: Bool) -> String { (photo ? photoMarkerPrefix : markerPrefix) + label }
+    static func markerLabel(_ contents: String) -> String? {
+        for p in [photoMarkerPrefix, markerPrefix] where contents.hasPrefix(p) { return String(contents.dropFirst(p.count)) }
+        return nil
+    }
+}
+
+/// One passage you marked on a page: a yellow streak in the margin beside underlined lines.
+/// Boxes are 0…1 of the page, from its bottom-left corner, one per line.
+struct MarkedPassage {
+    let boxes: [CGRect]
+    let text: String
+    let marginNotes: [String]
+}
+
+/// Finds marked passages in a page's pixels. A yellow streak says "look here"; the pen underlines beside it say
+/// where the passage starts and ends, because the streak itself is drawn roughly. Underlines with no yellow beside
+/// them are left alone. `rgba` is 4 bytes a pixel, top row first.
+enum BookMarks {
+    /// The note a passage starts with: only your handwriting beside it, if any was found.
+    static func comment(_ p: MarkedPassage) -> String {
+        p.marginNotes.isEmpty ? "" : "Margin note (uncertain): " + p.marginNotes.joined(separator: " ")
+    }
+
+    /// A corrected quote is kept after your note in the highlight's comment, so it stays in the PDF and is searchable.
+    static let quoteMark = "Edited quote: "
+    static func splitContents(_ contents: String) -> (note: String, quote: String?) {
+        let found = contents.hasPrefix(quoteMark) ? contents.range(of: quoteMark)
+                                                  : contents.range(of: "\n" + quoteMark, options: .backwards)
+        guard let r = found else { return (contents, nil) }
+        let quote = contents[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = contents[..<r.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        return (note, quote.isEmpty ? nil : quote)
+    }
+    static func joinContents(note: String, quote: String?) -> String {
+        guard let q = quote, !q.isEmpty else { return note }
+        return note.isEmpty ? quoteMark + q : note + "\n\n" + quoteMark + q
+    }
+
+    /// Boxes on the same line joined into one, top line first, so a highlight that's been extended stays one
+    /// box per line and its quote reads in order. (PDF boxes: y counts up from the bottom.)
+    static func mergeLines(_ boxes: [CGRect]) -> [CGRect] {
+        var out: [CGRect] = []
+        for b in boxes.sorted(by: { $0.midY > $1.midY }) {
+            if let l = out.last {
+                let shared = min(l.maxY, b.maxY) - max(l.minY, b.minY)
+                if shared * 2 >= min(l.height, b.height) { out[out.count - 1] = l.union(b); continue }
+            }
+            out.append(b)
+        }
+        return out
+    }
+
+    /// The rows each yellow streak covers, as (top, bottom) pixel rows.
+    static func streaks(rgba: [UInt8], width w: Int, height h: Int) -> [(top: Int, bottom: Int)] {
+        var rows = [Int](repeating: 0, count: h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                let r = Int(rgba[i]), g = Int(rgba[i + 1]), b = Int(rgba[i + 2])
+                if r > 140, g > 128, b * 100 < 62 * min(r, g) { rows[y] += 1 }
+            }
+        }
+        let enough = max(4, w * 12 / 1000), gap = max(2, h / 120), tallest = max(4, h / 50)
+        var out: [(top: Int, bottom: Int)] = []
+        var start: Int?, last = 0
+        for y in 0..<h where rows[y] >= enough {
+            if let s = start, y - last > gap {
+                if last - s >= tallest { out.append((s, last)) }
+                start = y
+            } else if start == nil { start = y }
+            last = y
+        }
+        if let s = start, last - s >= tallest { out.append((s, last)) }
+        return out
+    }
+
+    /// Pen strokes: pixels darker than their surroundings (so shadows don't count), in long level runs. Letters
+    /// are too short to count, which leaves the underlines.
+    static func strokes(rgba: [UInt8], width w: Int, height h: Int) -> [Bool] {
+        var gray = [Int](repeating: 0, count: w * h)
+        for i in 0..<(w * h) { gray[i] = Int(rgba[i * 4]) + Int(rgba[i * 4 + 1]) + Int(rgba[i * 4 + 2]) }
+        var sum = [Int](repeating: 0, count: (w + 1) * (h + 1))        // running totals, for a quick local average
+        for y in 0..<h {
+            var row = 0
+            for x in 0..<w {
+                row += gray[y * w + x]
+                sum[(y + 1) * (w + 1) + x + 1] = sum[y * (w + 1) + x + 1] + row
+            }
+        }
+        let radius = max(3, h * 25 / 2400), longest = max(6, h * 36 / 2400)
+        var out = [Bool](repeating: false, count: w * h)
+        for y in 0..<h {
+            let y0 = max(0, y - radius), y1 = min(h, y + radius + 1)
+            var run = 0
+            for x in 0...w {
+                var dark = false
+                if x < w {
+                    let x0 = max(0, x - radius), x1 = min(w, x + radius + 1)
+                    let total = sum[y1 * (w + 1) + x1] - sum[y0 * (w + 1) + x1] - sum[y1 * (w + 1) + x0] + sum[y0 * (w + 1) + x0]
+                    dark = gray[y * w + x] * (x1 - x0) * (y1 - y0) * 100 < total * 72
+                }
+                if dark { run += 1; continue }
+                if run >= longest { for k in (x - run)..<x { out[y * w + k] = true } }
+                run = 0
+            }
+        }
+        return out
+    }
+
+    /// Is this word underlined? Looks in a band under it for pen strokes along at least half its width.
+    private static func underlined(_ word: OCRWord, strokes: [Bool], width w: Int, height h: Int) -> Bool {
+        let wordHeight = word.box.height * CGFloat(h)
+        let bottom = (1 - word.box.minY) * CGFloat(h)
+        let y0 = max(0, Int(bottom - wordHeight * 0.25)), y1 = min(h, Int(bottom + wordHeight * 0.75))
+        let x0 = max(0, Int(word.box.minX * CGFloat(w))), x1 = min(w, Int(word.box.maxX * CGFloat(w)))
+        guard x1 > x0, y1 > y0 else { return false }
+        var covered = 0
+        for x in x0..<x1 {
+            for y in y0..<y1 where strokes[y * w + x] { covered += 1; break }
+        }
+        return covered * 2 >= x1 - x0
+    }
+
+    static func passages(rgba: [UInt8], width w: Int, height h: Int, lines: [OCRLine]) -> [MarkedPassage] {
+        guard w > 0, h > 0, rgba.count >= w * h * 4 else { return [] }
+        let found = streaks(rgba: rgba, width: w, height: h)
+        guard !found.isEmpty else { return [] }
+        let ink = strokes(rgba: rgba, width: w, height: h)
+        // the text column, so handwriting in the margin isn't taken for the book
+        let printed = lines.filter { $0.words.count >= 4 }
+        let lefts = printed.map { $0.box.minX }.sorted(), rights = printed.map { $0.box.maxX }.sorted()
+        guard !lefts.isEmpty else { return [] }
+        let left = lefts[lefts.count / 2], right = rights[rights.count / 2]
+        func inMargin(_ l: OCRLine) -> Bool { l.box.maxX < left || l.box.minX > right }
+        func row(_ l: OCRLine) -> CGFloat { (1 - l.box.midY) * CGFloat(h) }
+        var out: [MarkedPassage] = []
+        for s in found {
+            func beside(_ l: OCRLine, _ slack: CGFloat) -> Bool {
+                let pad = l.box.height * CGFloat(h) * slack
+                return row(l) >= CGFloat(s.top) - pad && row(l) <= CGFloat(s.bottom) + pad
+            }
+            let near = lines.filter { !inMargin($0) && beside($0, 0.5) }.sorted { row($0) < row($1) }
+            let marks = near.map { l in l.words.map { underlined($0, strokes: ink, width: w, height: h) } }
+            var chosen: [(line: OCRLine, from: Int)] = []
+            // one stray word doesn't start a passage: the first line needs two
+            let start = marks.firstIndex { m in m.filter { $0 }.count >= 2 } ?? marks.firstIndex { $0.contains(true) }
+            if let first = start, let last = marks.lastIndex(where: { $0.contains(true) }), first <= last {
+                // the first line starts at its first underlined word; the rest are whole lines
+                for i in first...last { chosen.append((near[i], i == first ? (marks[i].firstIndex(of: true) ?? 0) : 0)) }
+            } else {
+                chosen = near.filter { beside($0, 0) }.map { ($0, 0) }     // yellow with no underline: trust the yellow
+            }
+            var boxes: [CGRect] = []
+            var words: [String] = []
+            for c in chosen {
+                let part = c.line.words.dropFirst(c.from)
+                guard let one = part.first else { continue }
+                boxes.append(part.dropFirst().reduce(one.box) { $0.union($1.box) })
+                words += part.map { $0.text }
+            }
+            guard !boxes.isEmpty else { continue }
+            let notes = lines.filter { inMargin($0) && beside($0, 1) }.map { $0.text }
+            out.append(MarkedPassage(boxes: boxes, text: words.joined(separator: " "), marginNotes: notes))
+        }
+        return out
+    }
+}
+
+/// Printed page numbers kept inside the PDF: one hidden marker per page, so a number stays with its page when
+/// pages are added or moved, and survives every save. (Real PDF page labels can't be written with PDFKit.)
+/// A marker is a 1-point, invisible square annotation, a type the notes code ignores.
+enum PageLabels {
+    static func isMarker(_ a: PDFAnnotation) -> Bool { BookPages.markerLabel(a.contents ?? "") != nil }
+    static func marked(_ page: PDFPage) -> String? {
+        for a in page.annotations {
+            if let l = BookPages.markerLabel(a.contents ?? "") { return l }
+        }
+        return nil
+    }
+    /// The page number to cite: our marker, else the PDF's own page label, else the page's position.
+    static func label(of page: PDFPage, index: Int) -> String {
+        marked(page) ?? page.label.flatMap { $0.isEmpty ? nil : $0 } ?? String(index + 1)
+    }
+    static func isPhotoPage(_ page: PDFPage) -> Bool {
+        page.annotations.contains { ($0.contents ?? "").hasPrefix(BookPages.photoMarkerPrefix) }
+    }
+    static func set(_ label: String, on page: PDFPage, photo: Bool) {
+        for a in page.annotations where isMarker(a) { page.removeAnnotation(a) }
+        let corner = page.bounds(for: .mediaBox).origin
+        let a = PDFAnnotation(bounds: CGRect(origin: corner, size: CGSize(width: 1, height: 1)), forType: .square, withProperties: nil)
+        a.contents = BookPages.markerText(label, photo: photo)
+        a.color = .clear
+        a.shouldDisplay = false
+        a.shouldPrint = false
+        page.addAnnotation(a)
+    }
+}
+
+/// One photographed page, cleaned up and read.
+struct PagePhoto {
+    let source: URL
+    let jpeg: Data
+    let lines: [OCRLine]
+    let cropped: Bool
+    var isbns: [String]
+    var passages: [MarkedPassage] = []
+    var text: String { lines.map { $0.text }.joined(separator: "\n") }
+}
+
+/// Everything that touches Apple's image and text recognition. All of it runs on this Mac.
+enum BookPhotos {
+    private static let context = CIContext()
+    private static let longSide: CGFloat = 2400     // pixels kept per page
+    private static let pageLongSide: CGFloat = 720  // points, so a page opens at about book size
+
+    private static func zeroed(_ image: CIImage) -> CIImage {
+        image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+    }
+
+    /// Reads one photo: one page, or two if it shows an open book. Empty if the file can't be read as a picture.
+    static func read(_ url: URL) -> [PagePhoto] {
+        guard let raw = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else { return [] }
+        let image = zeroed(raw)
+        let crop = pageCrop(image)
+        let (page, lines) = upright(crop ?? image)
+        let printed = barcodes(image)
+        func photo(_ i: CIImage, _ l: [OCRLine]) -> PagePhoto? {
+            // your marks are read from the photo as taken; the PDF gets the page with whitened paper
+            guard let original = jpeg(i), let j = jpeg(whitened(i)) else { return nil }
+            var found = printed
+            for n in BookPages.isbns(in: l.map { $0.text }.joined(separator: "\n")) where !found.contains(n) { found.append(n) }
+            return PagePhoto(source: url, jpeg: j, lines: l, cropped: crop != nil, isbns: found, passages: marked(original, l))
+        }
+        // wider than tall: an open book, if both halves are full of text
+        if page.extent.width > page.extent.height * 1.1 {
+            let w = page.extent.width / 2, h = page.extent.height
+            let left = zeroed(page.cropped(to: CGRect(x: 0, y: 0, width: w, height: h)))
+            let right = zeroed(page.cropped(to: CGRect(x: w, y: 0, width: w, height: h)))
+            let l = recognise(left), r = recognise(right)
+            if characters(l) >= 200, characters(r) >= 200 {
+                return [photo(left, l), photo(right, r)].compactMap { $0 }
+            }
+        }
+        return photo(page, lines).map { [$0] } ?? []
+    }
+
+    /// Removes shadows and whitens the paper. On grey photographed paper a highlight turns dark gold; on white
+    /// it's the same yellow as in any other PDF.
+    private static func whitened(_ image: CIImage) -> CIImage {
+        let out = image.applyingFilter("CIDocumentEnhancer", parameters: [:])
+        return out.extent.isEmpty || out.extent.isInfinite ? image : zeroed(out.cropped(to: image.extent))
+    }
+
+    /// The passages marked on a page of text.
+    private static func marked(_ jpeg: Data, _ lines: [OCRLine]) -> [MarkedPassage] {
+        guard lines.count >= 8, let source = CGDataProvider(data: jpeg as CFData),
+              let picture = CGImage(jpegDataProviderSource: source, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+              let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return [] }
+        let w = picture.width, h = picture.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
+            guard let c = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                    space: sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            c.draw(picture, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return drawn ? BookMarks.passages(rgba: pixels, width: w, height: h, lines: lines) : []
+    }
+
+    /// Writes marked passages onto a PDF page as Interesting highlights, one per passage, flagged to be checked.
+    static func highlight(_ passages: [MarkedPassage], on page: PDFPage) {
+        let size = page.bounds(for: .mediaBox).size
+        for p in passages {
+            let rects = p.boxes.map { CGRect(x: $0.minX * size.width, y: $0.minY * size.height,
+                                             width: $0.width * size.width, height: $0.height * size.height) }
+            guard let first = rects.first else { continue }
+            let box = rects.dropFirst().reduce(first) { $0.union($1) }
+            let a = PDFAnnotation(bounds: box, forType: .highlight, withProperties: nil)
+            a.color = HighlightLevel.interesting.nsColor
+            a.quadrilateralPoints = rects.flatMap { r -> [NSValue] in
+                let x0 = r.minX - box.minX, x1 = r.maxX - box.minX
+                let y0 = r.minY - box.minY, y1 = r.maxY - box.minY
+                return [NSValue(point: NSPoint(x: x0, y: y1)), NSValue(point: NSPoint(x: x1, y: y1)),
+                        NSValue(point: NSPoint(x: x0, y: y0)), NSValue(point: NSPoint(x: x1, y: y0))]
+            }
+            let note = BookMarks.comment(p)
+            if !note.isEmpty { a.contents = note }
+            a.userName = NSFullUserName()
+            a.modificationDate = Date()
+            page.addAnnotation(a)
+        }
+    }
+
+    private static func characters(_ lines: [OCRLine]) -> Int { lines.reduce(0) { $0 + $1.text.count } }
+
+    /// Finds the page in the photo and squares it up. nil if no clear page is found (the whole photo is used).
+    private static func pageCrop(_ image: CIImage) -> CIImage? {
+        let request = VNDetectDocumentSegmentationRequest()
+        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+        try? handler.perform([request])
+        guard let r = request.results?.first, r.confidence > 0.5 else { return nil }
+        let share = BookPages.area([r.topLeft, r.topRight, r.bottomRight, r.bottomLeft])
+        guard share > 0.2, share < 0.995 else { return nil }
+        let size = image.extent.size
+        func v(_ p: CGPoint) -> CIVector { CIVector(x: p.x * size.width, y: p.y * size.height) }
+        let out = image.applyingFilter("CIPerspectiveCorrection", parameters: [
+            "inputTopLeft": v(r.topLeft), "inputTopRight": v(r.topRight),
+            "inputBottomRight": v(r.bottomRight), "inputBottomLeft": v(r.bottomLeft)])
+        return out.extent.isInfinite || out.extent.isEmpty ? nil : zeroed(out)
+    }
+
+    /// Reads the text; a phone held flat often saves the wrong way up, so if little is found, tries the other three turns.
+    private static func upright(_ image: CIImage) -> (CIImage, [OCRLine]) {
+        var best = (image, recognise(image))
+        guard characters(best.1) < 200 else { return best }
+        for turn in [CGImagePropertyOrientation.right, .left, .down] {
+            let turned = zeroed(image.oriented(turn))
+            let lines = recognise(turned)
+            if characters(lines) > characters(best.1) { best = (turned, lines) }
+        }
+        return best
+    }
+
+    private static func recognise(_ image: CIImage) -> [OCRLine] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.automaticallyDetectsLanguage = true
+        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+        try? handler.perform([request])
+        var out: [OCRLine] = []
+        for o in request.results ?? [] {
+            guard let t = o.topCandidates(1).first else { continue }
+            let s = t.string
+            let ranges = BookPages.wordRanges(s)
+            let boxes = ranges.map { r in (try? t.boundingBox(for: r))?.boundingBox }
+            // Vision sometimes gives every word the whole line's box
+            let good = !boxes.contains { $0 == nil }
+                && !(ranges.count >= 3 && boxes.contains { ($0?.width ?? 0) > o.boundingBox.width * 0.9 })
+            let words = good ? zip(ranges, boxes).map { OCRWord(text: String(s[$0]), box: $1 ?? o.boundingBox) }
+                             : BookPages.spread(ranges.map { String(s[$0]) }, across: o.boundingBox)
+            out.append(OCRLine(text: s, box: o.boundingBox, words: words))
+        }
+        return out
+    }
+
+    /// An ISBN from a barcode (a back cover), if the photo shows one.
+    private static func barcodes(_ image: CIImage) -> [String] {
+        let request = VNDetectBarcodesRequest()
+        request.symbologies = [.ean13]
+        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+        try? handler.perform([request])
+        return (request.results ?? []).compactMap { $0.payloadStringValue }.compactMap(BookPages.isbn13)
+    }
+
+    private static func jpeg(_ image: CIImage) -> Data? {
+        let long = max(image.extent.width, image.extent.height)
+        let s = min(1, longSide / max(long, 1))
+        let scaled = zeroed(image.transformed(by: CGAffineTransform(scaleX: s, y: s)))
+        let box = CGRect(origin: .zero, size: CGSize(width: floor(scaled.extent.width), height: floor(scaled.extent.height)))
+        guard box.width >= 1, box.height >= 1, let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let quality = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        return context.jpegRepresentation(of: scaled.cropped(to: box), colorSpace: sRGB, options: [quality: 0.72])
+    }
+
+    /// A one-page PDF: the words first, then the picture on top of them. The words can't be seen, but search,
+    /// selection and highlighting all use them.
+    static func pageData(_ p: PagePhoto) -> Data? {
+        guard let source = CGDataProvider(data: p.jpeg as CFData),
+              let picture = CGImage(jpegDataProviderSource: source, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return nil }
+        let px = CGSize(width: picture.width, height: picture.height)
+        let k = pageLongSide / max(px.width, px.height)
+        var box = CGRect(x: 0, y: 0, width: px.width * k, height: px.height * k)
+        let data = NSMutableData()
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let c = CGContext(consumer: consumer, mediaBox: &box, nil) else { return nil }
+        c.beginPDFPage(nil)
+        for line in p.lines {
+            for w in line.words {
+                let r = CGRect(x: w.box.minX * box.width, y: w.box.minY * box.height,
+                               width: w.box.width * box.width, height: w.box.height * box.height)
+                guard r.width > 0, r.height > 0 else { continue }
+                func typeset(_ text: String, size: CGFloat) -> CTLine {
+                    let font = CTFontCreateWithName("Helvetica" as CFString, size, nil)
+                    return CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]) as CFAttributedString)
+                }
+                // sized to fit the word's width: stretching the text instead breaks words into s p a c e d letters
+                let natural = r.height * 0.9
+                let width = CTLineGetTypographicBounds(typeset(w.text, size: natural), nil, nil, nil)
+                guard width > 0 else { continue }
+                c.textPosition = CGPoint(x: r.minX, y: r.minY + r.height * 0.2)
+                CTLineDraw(typeset(w.text + " ", size: natural * r.width / CGFloat(width)), c)     // the space keeps words apart in copied text
+            }
+        }
+        c.draw(picture, in: box)
+        c.endPDFPage()
+        c.closePDF()
+        return data as Data
+    }
+
+    /// Adds pages to a book's PDF (making it if needed), each where its page number says it goes. A page already
+    /// there is replaced by a new photo of it, unless it has highlights, when the new one goes next to it.
+    /// Returns where the first new page is and how many went in, or nil if the PDF couldn't be written.
+    static func add(_ pages: [(photo: PagePhoto, label: String)], to url: URL) -> (first: Int, placed: Int)? {
+        let fm = FileManager.default
+        let exists = fm.fileExists(atPath: url.path)
+        let opened = exists ? PDFDocument(url: url) : PDFDocument()
+        guard let doc = opened, !doc.isLocked else { return nil }
+        var held: [PDFDocument] = []          // a page needs its own document alive until the save
+        var first: Int?
+        var placed = 0
+        var previous: Double?
+        var unknowns = 0.0
+        for (photo, label) in pages {
+            guard let data = pageData(photo), let single = PDFDocument(data: data), let page = single.page(at: 0) else { continue }
+            held.append(single)
+            var at: Int?
+            if label != BookPages.noNumber && label != BookPages.front {
+                for i in 0..<doc.pageCount {
+                    guard let old = doc.page(at: i), PageLabels.marked(old) == label else { continue }
+                    if old.annotations.contains(where: Marginalia.isMarkup) { at = i + 1 } else { doc.removePage(at: i); at = i }
+                    break
+                }
+            }
+            if at == nil {
+                let rank: Double
+                if let r = BookPages.rank(label) { rank = r; unknowns = 0 } else { unknowns += 0.001; rank = (previous ?? .greatestFiniteMagnitude) + unknowns }
+                let ranks = (0..<doc.pageCount).map { i in doc.page(at: i).flatMap(PageLabels.marked).flatMap(BookPages.rank) }
+                at = BookPages.insertionIndex(rank: rank, among: ranks)
+            }
+            guard let index = at else { continue }
+            doc.insert(page, at: index)
+            if let placed = doc.page(at: index) {
+                PageLabels.set(label, on: placed, photo: true)
+                highlight(photo.passages, on: placed)
+            }
+            if let r = BookPages.rank(label) { previous = r }
+            first = min(first ?? index, index)
+            placed += 1
+        }
+        guard let start = first else { return nil }
+        keepSummaryOnFirstPage(doc)
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).pdfsearch-saving")
+        guard withExtendedLifetime(held, { doc.write(to: tmp) }) else { try? fm.removeItem(at: tmp); return nil }
+        do {
+            if exists { _ = try fm.replaceItemAt(url, withItemAt: tmp) } else { try fm.moveItem(at: tmp, to: url) }
+        } catch {
+            try? fm.removeItem(at: tmp)
+            return nil
+        }
+        return (start, placed)
+    }
+
+    /// "About this paper" is read from page 1, so it has to stay there when a page goes in front of it.
+    static func keepSummaryOnFirstPage(_ doc: PDFDocument) {
+        guard doc.pageCount > 1, let top = doc.page(at: 0) else { return }
+        for i in 1..<doc.pageCount {
+            guard let p = doc.page(at: i) else { continue }
+            for a in p.annotations where Marginalia.isSummary(a) { p.removeAnnotation(a); top.addAnnotation(a) }
+        }
+    }
+
+    /// Moves a photo into a folder, never over another file. False if it couldn't be moved.
+    static func move(_ url: URL, into folder: String) -> Bool {
+        let fm = FileManager.default
+        guard (try? fm.createDirectory(atPath: folder, withIntermediateDirectories: true)) != nil else { return false }
+        let stem = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
+        var dest = URL(fileURLWithPath: folder).appendingPathComponent(url.lastPathComponent)
+        var n = 2
+        while fm.fileExists(atPath: dest.path) {
+            dest = URL(fileURLWithPath: folder).appendingPathComponent("\(stem) \(n).\(ext)")
+            n += 1
+        }
+        return (try? fm.moveItem(at: url, to: dest)) != nil
+    }
+
+    static func hasCover(_ url: URL) -> Bool {
+        guard let page = PDFDocument(url: url)?.page(at: 0) else { return false }
+        return PageLabels.marked(page) == BookPages.cover
+    }
+    /// A PDF made from photos, which can grow, rather than a full book or chapter, which is left alone.
+    static func isPhotoBook(_ url: URL) -> Bool {
+        guard let doc = PDFDocument(url: url), doc.pageCount > 0, let page = doc.page(at: 0) else { return false }
+        return PageLabels.isPhotoPage(page)
+    }
+}
+
+extension Library {
+    static let photoTypes: Set<String> = ["jpg", "jpeg", "heic", "heif", "png", "tif", "tiff"]
+    static func isPhoto(_ url: URL) -> Bool { photoTypes.contains(url.pathExtension.lowercased()) }
+
+    func choosePhotos() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Add"
+        panel.message = "Choose photos of book pages. Include the copyright page for a new book."
+        if panel.runModal() == .OK { addPhotos(panel.urls) }
+    }
+
+    /// The one place to put photos of book pages. PDF Search empties it whenever it comes to the front:
+    /// filed photos go to Done/<key>, photos it couldn't file go to Not Filed/<key> (or the ISBN, or
+    /// "Unknown book <date>"). Your originals are never deleted.
+    static var photoInbox: String { Paths.papers + "/Book Photos" }
+
+    func openPhotoInbox() {
+        try? FileManager.default.createDirectory(atPath: Library.photoInbox, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(URL(fileURLWithPath: Library.photoInbox, isDirectory: true))
+    }
+
+    /// Photos waiting in the inbox, with their sizes.
+    private func inboxPhotos() -> [URL: Int] {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        let items = (try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: Library.photoInbox, isDirectory: true),
+                                                                  includingPropertiesForKeys: keys, options: .skipsHiddenFiles)) ?? []
+        var out: [URL: Int] = [:]
+        for u in items where Library.isPhoto(u) && !photoQueued.contains(u.path) {
+            guard let v = try? u.resourceValues(forKeys: Set(keys)), let size = v.fileSize, size > 0 else { continue }
+            // Finder dates a file 1984 while it's still copying
+            if let d = v.contentModificationDate, d.timeIntervalSince1970 < 473_385_600 { continue }
+            out[u] = size
+        }
+        return out
+    }
+
+    /// Looks in the inbox (when the app comes to the front). A photo is taken once its size has stopped
+    /// changing, so one still being copied waits.
+    func checkPhotoInbox() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: Paths.papers) else { return }     // the stick isn't plugged in
+        try? fm.createDirectory(atPath: Library.photoInbox, withIntermediateDirectories: true)
+        let first = inboxPhotos()
+        guard !first.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            let second = self.inboxPhotos()
+            let ready = second.filter { first[$0.key] == $0.value }.map { $0.key }
+            if !ready.isEmpty { self.addPhotos(ready) }
+            if ready.count < second.count { self.checkPhotoInbox() }
+        }
+    }
+
+    /// Finds citation details for imported PDFs in the background, with no cards. Only details that match the PDF
+    /// are kept; anything else stays searchable with no entry. `inPlace` leaves files where they are (a folder you
+    /// added); otherwise each is copied into Papers/Library and your original stays put.
+    func lookUpDetails(_ urls: [URL], inPlace: Bool) {
+        let before = photoTask
+        photoTask = Task { @MainActor in
+            await before?.value
+            let wanted = urls.filter { bib.entry(forPath: $0.standardizedFileURL.path) == nil }
+            guard !wanted.isEmpty else { return }
+            var found = 0
+            for (i, u) in wanted.enumerated() {
+                showFlash("Looking up details: \(i + 1) of \(wanted.count)…", seconds: 60)
+                if let m = await details(for: u) {
+                    let key = m.key(existing: bib.libraryKeys)
+                    if addToLibrary(type: m.kind.bibType, key: key, fields: m.fields, file: u, move: false, inPlace: inPlace, quiet: true) { found += 1 }
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)     // be gentle with the lookup services
+            }
+            reloadBib(force: true)
+            refresh()
+            let missed = wanted.count - found
+            showFlash("Found details for \(found) of \(wanted.count) PDFs." + (missed == 0 ? "" : " To fix the rest, right-click ▸ Look Up Citation Details…"), seconds: 15)
+        }
+    }
+
+    @MainActor
+    private func details(for url: URL) async -> AddPaperModel? {
+        let m = AddPaperModel(file: url)
+        await m.start()
+        guard !m.title.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        if !m.isbn.isEmpty && m.doi.isEmpty { return m }     // a book, found by its ISBN (checked by its check digit)
+        let front = await Task.detached(priority: .utility) { () -> String in
+            guard let doc = PDFDocument(url: url) else { return "" }
+            return (0..<min(8, doc.pageCount)).compactMap { doc.page(at: $0)?.string }.joined(separator: "\n")
+        }.value
+        return BookPages.titleAppears(m.title, in: front) ? m : nil
+    }
+
+    /// Turns photos into book pages. Batches run one after another, in the background.
+    func addPhotos(_ urls: [URL]) {
+        let fresh = urls.filter { !photoQueued.contains($0.path) }
+        guard !fresh.isEmpty else { return }
+        photoQueued.formUnion(fresh.map { $0.path })
+        let before = photoTask
+        photoTask = Task { @MainActor in
+            await before?.value
+            await importPhotos(fresh)
+        }
+    }
+
+    @MainActor
+    private func importPhotos(_ urls: [URL]) async {
+        // right after launch the bibliography may not be loaded yet, and a known book would look new
+        var waited = 0
+        while bib.entries.isEmpty, waited < 50, FileManager.default.fileExists(atPath: Paths.libraryBib) {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            waited += 1
+        }
+        if bib.entries.isEmpty, FileManager.default.fileExists(atPath: Paths.libraryBib) {
+            photoQueued.subtract(urls.map { $0.path })
+            showFlash("Couldn't read library.bib, so the photos weren't filed.", seconds: 15)
+            return
+        }
+        Viewer.current?.flushSave()
+        let sorted = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        var photos: [PagePhoto] = []
+        var unreadable: [URL] = []
+        for (i, u) in sorted.enumerated() {
+            showFlash("Reading photo \(i + 1) of \(sorted.count)…", seconds: 120)
+            let read = await Task.detached(priority: .userInitiated) { BookPhotos.read(u) }.value
+            if read.isEmpty { unreadable.append(u) }
+            photos += read
+        }
+        let numbers = photos.map { BookPages.printedNumber($0.lines, cropped: $0.cropped) }
+        // an ISBN on a numbered page is another book being mentioned, not this one's
+        for i in photos.indices where numbers[i] != nil { photos[i].isbns = [] }
+        let shots = photos.indices.map { (isbns: photos[$0].isbns, numbered: numbers[$0] != nil) }
+        var messages: [String] = []
+        var outcome: [URL: (folder: String, filed: Bool)] = [:]     // where each photo goes next
+        for group in BookPages.groups(shots) {
+            let pages = group.map { photos[$0] }
+            let done = await fileBook(pages, numbers: group.map { numbers[$0] })
+            messages.append(done.message)
+            for p in pages where outcome[p.source]?.filed != true { outcome[p.source] = (done.folder, done.filed) }
+        }
+        if !unreadable.isEmpty { messages.append("\(unreadable.count) file\(unreadable.count == 1 ? "" : "s") couldn't be read as a photo.") }
+        // empty the inbox into a folder named for the book; a photo that can't be moved stays queued, so it
+        // isn't read again and again
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HHmmss"
+        let nameless = "Unknown book " + f.string(from: Date())
+        var parked = Set<String>()
+        for u in urls {
+            let inInbox = u.deletingLastPathComponent().path == URL(fileURLWithPath: Library.photoInbox).path
+            guard inInbox else { photoQueued.remove(u.path); continue }
+            let filed = outcome[u]?.filed == true
+            let name = (outcome[u]?.folder).flatMap { $0.isEmpty ? nil : $0 } ?? nameless
+            if !filed { parked.insert(name) }
+            if BookPhotos.move(u, into: Library.photoInbox + (filed ? "/Done/" : "/Not Filed/") + name) { photoQueued.remove(u.path) }
+        }
+        if !parked.isEmpty { messages.append("Not filed: see Book Photos/Not Filed/" + parked.sorted().joined(separator: ", ") + ".") }
+        showFlash(messages.joined(separator: " "), seconds: 20)
+    }
+
+    /// What's known about the book in a batch: an entry already in library.bib, or the details of a new one.
+    private enum Book { case known(BibEntry), new(type: String, key: String, fields: [String: String]), unknown(String) }
+
+    @MainActor
+    private func identify(_ photos: [PagePhoto]) async -> Book {
+        let books = bib.entries.filter { $0.inLibrary && $0.type == "book" }
+        var wanted: [String] = []
+        for p in photos { for i in p.isbns where !wanted.contains(i) { wanted.append(i) } }
+        for i in wanted {
+            if let e = books.first(where: { BookPages.isbnList($0.fields["isbn"] ?? "").contains(i) }) { return .known(e) }
+        }
+        for i in wanted {
+            guard let b = await Lookup.book(isbn: i) else { continue }
+            let title = Lookup.clean(b.title)
+            let names = b.authors.map(Lookup.lastFirst)
+            let last = names.first.map(BibEntry.lastName) ?? ""
+            let same = books.first { e in
+                BookPages.shortTitle(e.title) == BookPages.shortTitle(title)
+                    && (last.isEmpty || e.people.contains { BibIndex.fold(BibEntry.lastName($0)) == BibIndex.fold(last) })
+                    && (e.fields["isbn"] == nil || e.year == b.year)      // a different edition has different pages
+            }
+            if let e = same { return .known(e) }
+            var f: [String: String] = ["title": title, "year": b.year, "publisher": b.publisher, "address": b.place, "isbn": i]
+            if !names.isEmpty { f["author"] = names.joined(separator: " and ") }
+            let key = CiteKey.make(lastName: last, year: b.year, title: title, existing: bib.libraryKeys)
+            return .new(type: "book", key: key, fields: f.filter { !$0.value.trimmingCharacters(in: .whitespaces).isEmpty })
+        }
+        if !wanted.isEmpty { return .unknown("No details found online for ISBN \(wanted[0]).") }
+        let heads = photos.map { BookPages.runningHeads($0.lines, cropped: $0.cropped) }
+        if let key = BookPages.bookForHeads(heads, books: books.map { (key: $0.key, title: $0.title) }),
+           let e = books.first(where: { $0.key == key }) { return .known(e) }
+        return .unknown("No ISBN, and the page headers didn't match a book in your library.")
+    }
+
+    /// Files one book's photos, and says what happened and whether they were filed.
+    @MainActor
+    private func fileBook(_ photos: [PagePhoto], numbers: [String?]) async -> (message: String, filed: Bool, folder: String) {
+        showFlash("Finding the book…", seconds: 120)
+        let book = await identify(photos)
+        let fm = FileManager.default
+        func labelled(cover has: Bool) -> [(photo: PagePhoto, label: String)] {
+            let labels = BookPages.labels(numbers: numbers, isbnPage: photos.map { !$0.isbns.isEmpty },
+                                          characters: photos.map { $0.text.count }, hasCover: has)
+            return Array(zip(photos, labels)).map { (photo: $0.0, label: $0.1) }
+        }
+        func place(_ pages: [(photo: PagePhoto, label: String)], in url: URL) async -> (first: Int, placed: Int)? {
+            await Task.detached(priority: .userInitiated) { BookPhotos.add(pages, to: url) }.value
+        }
+        // so highlights reach the paper note and My Notes straight away
+        func mirror(_ path: String) {
+            guard photos.contains(where: { !$0.passages.isEmpty }), let doc = PDFDocument(url: URL(fileURLWithPath: path)) else { return }
+            afterSave(path: path, notes: Marginalia.collect(doc), summary: Marginalia.summary(doc))
+        }
+        func summary(_ pages: [(photo: PagePhoto, label: String)], placed: Int, _ key: String) -> String {
+            let blank = pages.filter { $0.label == BookPages.noNumber }.count
+            let note = blank == 0 ? "" : " \(blank) with no readable page number (cited as p. ?; fix with File ▸ Set Printed Page Number…)."
+            let lost = pages.count - placed
+            let failed = lost == 0 ? "" : " \(lost) couldn't be added."
+            let marked = photos.reduce(0) { $0 + $1.passages.count }
+            let found = marked == 0 ? "" : " \(marked) marked passage\(marked == 1 ? "" : "s") highlighted."
+            return "Added \(placed) page\(placed == 1 ? "" : "s") to @\(key).\(found)\(note)\(failed)"
+        }
+        switch book {
+        case .unknown(let why):
+            let isbn = photos.lazy.flatMap({ $0.isbns }).first
+            return (why + " Nothing was filed. Add a photo of the book's copyright page and try again.", false, isbn.map { "ISBN " + $0 } ?? "")
+        case .known(let e):
+            let dest = URL(fileURLWithPath: Paths.libraryFolder + "/" + e.key + ".pdf")
+            let own = e.file.map { URL(fileURLWithPath: $0) } ?? dest
+            if fm.fileExists(atPath: own.path), !BookPhotos.isPhotoBook(own) {
+                return ("You already have @\(e.key) as a PDF, so these photos were not added to it.", false, e.key)
+            }
+            do { try fm.createDirectory(at: own.deletingLastPathComponent(), withIntermediateDirectories: true) } catch { return ("Couldn't save the pages: \(error.localizedDescription)", false, e.key) }
+            // this PDF may be open: save it and close it, so nothing can write the old copy back over the new one
+            if Viewer.current?.path == own.path { Viewer.current?.close() } else { Viewer.current?.flushSave() }
+            let pages = labelled(cover: BookPhotos.hasCover(own))
+            guard let done = await place(pages, in: own) else { return ("Couldn't save the pages to @\(e.key).", false, e.key) }
+            refresh()
+            mirror(own.path)
+            openPage(own.path, done.first)
+            return (summary(pages, placed: done.placed, e.key), true, e.key)
+        case .new(let type, let key, let fields):
+            let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".pdf")
+            let pages = labelled(cover: false)
+            guard let done = await place(pages, in: tmp) else { return ("Couldn't make a PDF for @\(key).", false, key) }
+            guard addToLibrary(type: type, key: key, fields: fields, file: tmp, move: true) else { return ("Couldn't add @\(key).", false, key) }
+            mirror(Paths.libraryFolder + "/" + key + ".pdf")
+            return (summary(pages, placed: done.placed, key), true, key)
+        }
+    }
+
+    private func openPage(_ path: String, _ index: Int) {
+        linkRequest = LinkRequest(path: path, page: index + 1, n: (linkRequest?.n ?? 0) + 1)
+    }
+}
+
 // MARK: - SQLite (full-text index)
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -4284,12 +5702,26 @@ final class DB {
         // Recently Edited: newest highlight/note date found in the PDF, and the time of each save made here
         exec("ALTER TABLE files ADD COLUMN edited REAL")
         exec("CREATE TABLE IF NOT EXISTS edits(path TEXT PRIMARY KEY, time REAL)")
+        // Recently Added: when each file first arrived. Its own table, because `store` replaces a file's row on every re-read.
+        exec("CREATE TABLE IF NOT EXISTS added(path TEXT PRIMARY KEY, time REAL)")
         // Index version 2 adds My Notes: read every PDF once more so its highlights and notes are indexed too.
         var version = 0
         if let st = prepare("PRAGMA user_version"), st.step() { version = st.int(0) }
         if ok && version < 2 {
             exec("UPDATE files SET mtime = 0")
             exec("PRAGMA user_version = 2")
+        }
+        // Index version 3: files already here are dated by when the file was created; new ones by when they arrive.
+        if ok && version < 3 {
+            var paths: [String] = []
+            if let st = prepare("SELECT path FROM files") { while st.step() { paths.append(st.text(0)) } }
+            exec("BEGIN")
+            for p in paths {
+                let d = (try? FileManager.default.attributesOfItem(atPath: p))?[.creationDate] as? Date
+                run("INSERT OR IGNORE INTO added(path, time) VALUES (?,?)", [p, d?.timeIntervalSince1970 ?? 0])
+            }
+            exec("COMMIT")
+            exec("PRAGMA user_version = 3")
         }
         return ok ? nil : "Couldn't open the index: \(lastError)"
     }
@@ -4388,6 +5820,7 @@ final class DB {
         let chars = pages?.reduce(0) { $0 + $1.utf16.count } ?? 0
         run("INSERT INTO files(path, mtime, size, npages, chars, edited) VALUES (?,?,?,?,?,?)",
             [path, mtime, size, pages?.count ?? -1, chars, edited])
+        run("INSERT OR IGNORE INTO added(path, time) VALUES (?,?)", [path, Date().timeIntervalSince1970])
         let id = Int(sqlite3_last_insert_rowid(db))
         if let ins = prepare("INSERT INTO fts(rowid, body) VALUES (?,?)") {
             let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
@@ -4554,6 +5987,19 @@ final class DB {
             WHERE max(coalesce(files.edited, 0), coalesce(edits.time, 0)) > 0
             ORDER BY t DESC
             LIMIT 1000
+            """) else { return out }
+        while st.step() { out.append((st.int(0), st.text(1), st.double(2))) }
+        return out
+    }
+
+    /// PDFs by when they arrived, newest first.
+    func addedFiles() -> [(id: Int, path: String, time: Double)] {
+        var out: [(id: Int, path: String, time: Double)] = []
+        guard let st = prepare("""
+            SELECT files.id, files.path, added.time FROM files JOIN added ON added.path = files.path
+            WHERE added.time > 0
+            ORDER BY added.time DESC, files.id DESC
+            LIMIT 500
             """) else { return out }
         while st.step() { out.append((st.int(0), st.text(1), st.double(2))) }
         return out

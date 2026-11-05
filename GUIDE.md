@@ -12,7 +12,7 @@ What PDF Search does, in six pictures. (To install it, see the [TL;DR in the REA
 - To find separate words anywhere on the same page, put **commas** between them: `accessible, design`.
 - **Results** show each paper's first page, title, author and year, its citation key (`@davanzo2020dimension`), and the matching text.
 - **Click a result** to open it. Your search words are marked in **orange**. The arrows at the top (**‹ 1 of 109 ›**, or ⌘G) jump from match to match.
-- **Search in** narrows the search: one folder, **My Notes** (only what you've written), or **Recently Edited** (papers you've worked on).
+- **Search in** narrows the search: one folder, **My Notes** (only what you've written), **Recently Edited** (papers you've worked on) or **Recently Added**.
 
 ---
 
@@ -72,6 +72,8 @@ Click **README** at the bottom of the results list (or **Help ▸ PDF Search REA
 
 ---
 
-**Adding papers:** drag a PDF onto the window. PDF Search finds its DOI, ISBN or title, fetches the citation details, shows them on a card to check, then files the PDF as `Papers/Library/<key>.pdf`.
+**Adding papers:** drag a PDF onto the window. PDF Search finds its DOI, ISBN or title, fetches the citation details, shows them on a card to check, then files the PDF as `Papers/Library/<key>.pdf`. Drag a folder and the details are found in the background.
+
+**Adding book pages:** put photos of pages in `Papers/Book Photos`, one book at a time, with the copyright page for a new book. They become a searchable PDF of the book, in page order. Yellow margin marks beside underlines become highlights. Click **Edit** on a highlight to correct text read from a photo.
 
 More detail: the [README](README.md) and [Developer Notes](dist/Developer%20Notes.md).
