@@ -84,6 +84,7 @@ struct PDFSearchApp: App {
         Settings {
             SettingsView().environmentObject(lib)
         }
+        .windowResizability(.contentMinSize)
     }
 }
 
@@ -94,6 +95,8 @@ struct SettingsView: View {
     @State private var bib = Paths.libraryBib
     @State private var notes = Paths.notesFolder
     @AppStorage("writeNotes") private var writeNotes = true
+    @State private var claudeKey = ClaudeReader.key ?? ""
+    @State private var style = MarkingStyle.load(from: Library.photoInbox)
 
     private var vaults: [ObsidianVaults.Vault] { ObsidianVaults.list() }
     /// the vault the notes folder is in, if any
@@ -102,7 +105,19 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        Form {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                settingsRows
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: 520, idealWidth: 640, maxWidth: .infinity,
+               minHeight: 360, idealHeight: 800, maxHeight: .infinity)
+        .background(ResizableWindow(size: NSSize(width: 640, height: 800)))
+    }
+
+    @ViewBuilder private var settingsRows: some View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Obsidian vault").frame(width: 110, alignment: .leading)
@@ -120,6 +135,7 @@ struct SettingsView: View {
                 }
                 Text("Choose your vault: paper notes go in its Literature folder, and library.bib in the vault. Or set the folders yourself below.")
                     .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
             row("Papers folder", papers, help: "Searched automatically. New papers go in its Library folder.") { path in
@@ -130,13 +146,48 @@ struct SettingsView: View {
                 set("libraryBib", path + "/library.bib"); bib = Paths.libraryBib; lib.reloadBib(force: true)
             } reset: { set("libraryBib", nil); bib = Paths.libraryBib; lib.reloadBib(force: true) }
             Toggle("Write a Markdown note for each paper I annotate", isOn: $writeNotes)
+                .toggleStyle(.checkbox)
             row("Notes folder", notes, help: "Plain Markdown files (@key.md): any notes app can open them. Obsidian users: a folder inside your vault.") { path in
                 set("notesFolder", path); notes = Paths.notesFolder; lib.syncOwnNotesSoon()
             } reset: { set("notesFolder", nil); notes = Paths.notesFolder; lib.syncOwnNotesSoon() }
                 .disabled(!writeNotes)
-        }
-        .padding(20)
-        .frame(width: 560)
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Claude API key").frame(width: 110, alignment: .leading)
+                    SecureField("Optional", text: $claudeKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: claudeKey) { k in ClaudeReader.setKey(k) }
+                }
+                Text("For book photos. With a key, Claude reads each page for exact quotes, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. Leave it empty and everything stays on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("How you mark your books").font(.headline)
+                Group {
+                    Toggle("A yellow streak in the margin marks a passage", isOn: $style.marginStreaks)
+                    Toggle("Pen underlines beside the streak pick out the exact words", isOn: $style.underlines)
+                        .disabled(!style.marginStreaks)
+                    Toggle("Big pen parentheses around a term make it a #tag", isOn: $style.parenthesisTags)
+                    Toggle("A page number written by hand, like P95, counts", isOn: $style.handwrittenPageNumbers)
+                }
+                .toggleStyle(.checkbox)
+                Text("Anything else Claude should know (optional)").padding(.top, 4)
+                TextField("", text: $style.noteForClaude, axis: .vertical)
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(3...8)
+                Text("For book photos. With everything off, photos become plain searchable pages. Kept in Book Photos/Marking Style.json, so it stays with your library.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
+            .onChange(of: style) { s in
+                if FileManager.default.fileExists(atPath: Paths.papers) { s.save(to: Library.photoInbox) }
+            }
     }
 
     private func set(_ key: String, _ value: String?) {
@@ -151,7 +202,7 @@ struct SettingsView: View {
                 Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                     .lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 8)
                 Button("Choose…") {
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true
@@ -160,11 +211,57 @@ struct SettingsView: View {
                     panel.prompt = "Choose"
                     if panel.runModal() == .OK, let url = panel.url { choose(url.standardizedFileURL.path) }
                 }
+                .fixedSize()
                 Button("Default") { reset() }
+                    .fixedSize()
             }
             Text(help).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// SwiftUI gives the Settings window a fixed size. This lets it be resized,
+/// and opens it big enough to show everything (or as tall as the screen allows).
+struct ResizableWindow: NSViewRepresentable {
+    let size: NSSize
+
+    final class Probe: NSView {
+        var wanted = NSSize.zero
+        private var sized = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
+
+        func apply() {
+            guard let w = window else { return }
+            w.styleMask.insert(.resizable)
+            guard !sized, let screen = w.screen ?? NSScreen.main else { return }
+            sized = true
+            let room = screen.visibleFrame
+            var f = w.frame
+            let titleBar = f.height - w.contentLayoutRect.height
+            let width = min(max(f.width, wanted.width), room.width)
+            let height = min(max(f.height, wanted.height + titleBar), room.height)
+            f.origin.y -= height - f.height     // the top edge stays where it is
+            f.size = NSSize(width: width, height: height)
+            if f.minY < room.minY { f.origin.y = room.minY }
+            if f.maxX > room.maxX { f.origin.x = max(room.minX, room.maxX - f.width) }
+            w.setFrame(f, display: true)
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let p = Probe()
+        p.wanted = size
+        return p
+    }
+
+    func updateNSView(_ view: Probe, context: Context) {
+        DispatchQueue.main.async { view.apply() }
     }
 }
 
@@ -3441,6 +3538,7 @@ enum SelfTest {
         print("SELFTEST page numbers: \(r.printedNumber([line("143", 0.05)], cropped: true) ?? "-") \(r.printedNumber([line("42 THE BOOK TITLE", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("CONTRIBUTORS vii", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("12 Ibid., 46.", 0.05)], cropped: true) ?? "none") \(r.fillGaps(["142", nil, "144"]).map { $0 ?? "?" }) (expect 143 42 vii none [142, 143, 144])")
         print("SELFTEST photo isbn: \(r.isbns(in: "ISBN 978-0-415-99873-4 (pbk)")) bad=\(r.isbns(in: "ISBN 978-0-415-99873-5")) ten=\(r.isbn13("0-415-99873-5") ?? "-") (expect [9780415998734] [] 9780415998734)")
         print("SELFTEST search words: \(Library.parse("Peters Taylor").parts) | \(Library.parse("\"exact phrase\" other").parts) | \(Library.parse("one, two").parts) (expect each word apart, the quoted phrase whole)")
+        print("SELFTEST key terms: \(BookMarks.tag(["a", "process", "of", "adoption)"])?.tag ?? "-") \(BookMarks.tag(["of", "the"])?.tag ?? "none") (expect process-of-adoption none)")
         print("SELFTEST title check: \(r.titleAppears("The Aesthetics of Failure", in: "Aesthetics of Failure, by Kim Cascone")) \(r.titleAppears("Protein Folding Models", in: "The aesthetics of failure")) (expect true false)")
         print("SELFTEST head match: \(r.headMatches("THE POETICS OF SPACE", title: "The Poetics of Space: A Study")) \(r.headMatches("Introduction", title: "The Poetics of Space")) (expect true false)")
 
@@ -3487,13 +3585,13 @@ enum SelfTest {
                      "how things go on between them and others", "the expectations that are normally met", "and the deeper images underlying these"]
         func page(_ name: String, _ n: String) -> PagePhoto? {
             guard let u = fakePhoto(name, head: "MODERN SOCIAL IMAGINARIES", body: words + words + words, number: n) else { return nil }
-            return BookPhotos.read(u).first
+            return BookPhotos.read(u, style: .mine).first
         }
         guard let p42 = page("a.jpg", "42"), let p41 = page("b.jpg", "41") else { print("SELFTEST photo book: FAILED to read a photo"); return }
         let found = BookPages.printedNumber(p42.lines, cropped: p42.cropped) ?? "-"
         print("SELFTEST photo read: \(p42.lines.count) lines, \(p42.text.count) characters, cropped=\(p42.cropped), number=\(found), heads=\(BookPages.runningHeads(p42.lines, cropped: p42.cropped)), \(p42.jpeg.count / 1024) KB (expect about 20 lines, cropped=true, number=42, head MODERN SOCIAL IMAGINARIES)")
         if let u = fakePhoto("isbn.jpg", head: nil, body: ["Copyright 2004 Duke University Press", "ISBN 978-0-415-99873-4 (pbk)"], number: nil) {
-            print("SELFTEST photo ISBN read: \(BookPhotos.read(u).first?.isbns ?? []) (expect [9780415998734])")
+            print("SELFTEST photo ISBN read: \(BookPhotos.read(u, style: .mine).first?.isbns ?? []) (expect [9780415998734])")
         }
         let book = dir.appendingPathComponent("book.pdf")
         let a = BookPhotos.add([(photo: p42, label: "42")], to: book)
@@ -3522,7 +3620,7 @@ enum SelfTest {
         } else { print("SELFTEST photo highlight: FAILED, the word wasn't found on page 42") }
         // a yellow streak beside underlined lines becomes one Interesting highlight
         if let u = fakePhoto("marked.jpg", head: "MODERN SOCIAL IMAGINARIES", body: words + words + words, number: "43", marks: true),
-           let marked = BookPhotos.read(u).first {
+           let marked = BookPhotos.read(u, style: .mine).first {
             let file = dir.appendingPathComponent("marked.pdf")
             _ = BookPhotos.add([(photo: marked, label: "43")], to: file)
             let n = PDFDocument(url: file).map(Marginalia.collect)?.first
@@ -3539,7 +3637,7 @@ enum SelfTest {
         let squeezed = OCRLine(text: "pharmakon hypomnemata", box: CGRect(x: 0.1, y: 0.5, width: 0.5, height: 0.03),
                                words: [OCRWord(text: "pharmakon", box: CGRect(x: 0.1, y: 0.5, width: 0.1, height: 0.03)),
                                        OCRWord(text: "hypomnemata", box: CGRect(x: 0.25, y: 0.5, width: 0.4, height: 0.03))])
-        let tight = PagePhoto(source: dir, jpeg: p41.jpeg, lines: [squeezed], cropped: true, isbns: [])
+        let tight = PagePhoto(source: dir, jpeg: p41.jpeg, original: p41.jpeg, lines: [squeezed], cropped: true, isbns: [])
         let tightText = BookPhotos.pageData(tight).flatMap { PDFDocument(data: $0)?.page(at: 0)?.string } ?? ""
         print("SELFTEST photo word spacing: \(tightText.trimmingCharacters(in: .whitespacesAndNewlines)) (expect pharmakon hypomnemata)")
         // the inbox: a photo moved to Done never replaces one already there
@@ -3549,7 +3647,7 @@ enum SelfTest {
         fm.createFile(atPath: shot.path, contents: Data("two".utf8))
         let m2 = BookPhotos.move(shot, into: done)
         print("SELFTEST photo inbox: moved \(m1) \(m2), Done holds \(((try? fm.contentsOfDirectory(atPath: done)) ?? []).sorted()), left behind=\(fm.fileExists(atPath: shot.path)) (expect true true [IMG_1 2.jpg, IMG_1.jpg] false)")
-        print("SELFTEST obsidian link: \(Marginalia.obsidianLink(note: "/Volumes/R/My Vault/Literature/@smith2020a.md", vault: "/Volumes/R/My Vault")) (expect vault=My%20Vault&file=Literature%2F%40smith2020a)")
+        print("SELFTEST obsidian link: \(Marginalia.obsidianLink(note: "/Volumes/R/My Vault/Literature/@smith2020a.md", vault: "/Volumes/R/My Vault") ?? "-") (expect vault=My%20Vault&file=Literature%2F%40smith2020a)")
         // the marker on an ordinary PDF (how page numbers get fixed on existing papers)
         if let doc2 = PDFDocument(data: BookPhotos.pageData(p41) ?? Data()), let only = doc2.page(at: 0) {
             PageLabels.set("177", on: only, photo: false)
@@ -4586,7 +4684,7 @@ struct AddPaperView: View {
 
 /// One word or line read from a photo. Boxes are 0…1 of the image, measured from its bottom-left corner.
 struct OCRWord { let text: String; let box: CGRect }
-struct OCRLine { let text: String; let box: CGRect; let words: [OCRWord] }
+struct OCRLine { let text: String; let box: CGRect; let words: [OCRWord]; var confidence: Float = 1 }
 
 /// The rules for reading a photographed page, kept apart from Apple's frameworks so --selftest can check them.
 enum BookPages {
@@ -4632,7 +4730,7 @@ enum BookPages {
 
     /// The number printed on a page: on its own in the top or bottom line, or at either end of a running head.
     /// `cropped` means the photo was trimmed to the page, so "near the edge" can be measured.
-    static func printedNumber(_ lines: [OCRLine], cropped: Bool) -> String? {
+    static func printedNumber(_ lines: [OCRLine], cropped: Bool, handwritten: Bool = true) -> String? {
         let ordered = lines.sorted { $0.box.midY > $1.box.midY }
         func nearEdge(_ l: OCRLine, top: Bool) -> Bool {
             !cropped || (top ? l.box.midY >= 0.87 : l.box.midY <= 0.13)
@@ -4645,6 +4743,12 @@ enum BookPages {
         for l in top + bottom {
             let t = clean(l.text)
             if folio(t) { return t }
+            // a number written in by hand, like "P95" or "p. 95"
+            let s = t.lowercased()
+            if handwritten, s.hasPrefix("p") {
+                let n = String(s.drop(while: { $0 == "p" || $0 == "." || $0 == " " }))
+                if arabic(n) != nil, folio(n) { return n }
+            }
         }
         for (group, strict) in [(Array(top), false), (Array(bottom), true)] {
             for l in group {
@@ -4834,6 +4938,116 @@ enum BookPages {
         return abs(s) / 2
     }
 
+    /// Is this page lying on its side? Most of its longer lines run up the page rather than across it.
+    /// How much this reads like the right way up. Sideways text comes back as one or two words to a line, and upside
+    /// down text as nonsense, so whole lines of letters that contain everyday words only happen the right way up.
+    static func readingScore(_ lines: [OCRLine]) -> Double {
+        var score = 0.0, words = 0, everyday = 0
+        for l in lines {
+            let letters = l.text.filter { $0.isLetter }.count
+            score += Double(letters) * Double(l.confidence) * (l.words.count >= 3 ? 1 : 0.1)
+            words += l.words.count
+            everyday += l.words.filter { commonWords.contains($0.text.lowercased().trimmingCharacters(in: .punctuationCharacters)) }.count
+        }
+        return score * (1 + 3 * Double(everyday) / Double(max(words, 1)))
+    }
+    private static let commonWords: Set<String> = ["the", "of", "and", "to", "in", "is", "that", "for", "it", "as", "with", "on", "be", "by", "this", "which", "are", "not",
+                                                   "de", "la", "le", "et", "les", "des", "der", "die", "und", "das", "el", "que", "en", "il", "di", "che", "o", "e", "a"]
+    /// Which of the four turns to use (0 is as it came). One of the others has to be clearly better.
+    static func bestTurn(_ scores: [Double]) -> Int {
+        guard let first = scores.first, let top = scores.max(), let best = scores.firstIndex(of: top) else { return 0 }
+        return top > first * 1.3 + 1 ? best : 0
+    }
+
+    /// What a page's ink says when it is held one way round.
+    struct InkReading {
+        var lines: Double       // how sharply the ink falls into rows
+        var lean: Double        // ink just above the body of the letters over ink just below it
+    }
+    /// Reads the ink of a page, about 1400 pixels on its long side. Printed lines make rows of ink, so `lines` is high when
+    /// the page is level and low when it's on its side. More letters rise above the line (b, d, h, capitals) than drop
+    /// below it (g, p, y), so `lean` is above 1 the right way up and below 1 upside down.
+    /// Works in eight narrow strips, so a curved or slanted line of print still counts.
+    static func inkReading(rgba: [UInt8], width w: Int, height h: Int) -> InkReading {
+        guard w > 40, h > 40, rgba.count >= w * h * 4 else { return InkReading(lines: 0, lean: 1) }
+        var sums = [Double](repeating: 0, count: (w + 1) * (h + 1))
+        var gray = [Double](repeating: 0, count: w * h)
+        for y in 0..<h {
+            var row = 0.0
+            for x in 0..<w {
+                let p = (y * w + x) * 4
+                let g = 0.299 * Double(rgba[p]) + 0.587 * Double(rgba[p + 1]) + 0.114 * Double(rgba[p + 2])
+                gray[y * w + x] = g
+                row += g
+                sums[(y + 1) * (w + 1) + x + 1] = sums[y * (w + 1) + x + 1] + row
+            }
+        }
+        // ink: clearly darker than its surroundings, so shadows don't count
+        let r = max(w, h) / 40
+        func isInk(_ x: Int, _ y: Int) -> Bool {
+            let x0 = max(0, x - r), x1 = min(w, x + r + 1), y0 = max(0, y - r), y1 = min(h, y + r + 1)
+            let total = sums[y1 * (w + 1) + x1] - sums[y0 * (w + 1) + x1] - sums[y1 * (w + 1) + x0] + sums[y0 * (w + 1) + x0]
+            return gray[y * w + x] < total / Double((x1 - x0) * (y1 - y0)) * 0.75
+        }
+        // the middle of the picture: the edges are where neighbouring pages and tables show
+        let left = w * 15 / 100, right = w * 85 / 100, top = h * 10 / 100, bottom = h * 90 / 100
+        let strips = 8, strip = (right - left) / strips, rows = bottom - top
+        guard strip > 0, rows > 8 else { return InkReading(lines: 0, lean: 1) }
+        var lines = 0.0, above = 0.0, below = 0.0
+        for s in 0..<strips {
+            // lines of print on a photo slant a little, and not all the same way, so each strip is levelled first
+            let x0 = left + s * strip
+            var points: [(x: Int, y: Int)] = []
+            for y in 0..<rows {
+                for x in x0..<(x0 + strip) where isInk(x, top + y) { points.append((x - x0 - strip / 2, y)) }
+            }
+            var raw = [Double](repeating: 0, count: rows), sharpest = -1.0
+            for step in -7...7 {
+                var trial = [Double](repeating: 0, count: rows)
+                let slant = Double(step) * 0.02
+                for p in points {
+                    let y = p.y + Int((Double(p.x) * slant).rounded())
+                    if y >= 0, y < rows { trial[y] += 1 }
+                }
+                let sharpness = trial.reduce(0) { $0 + $1 * $1 }
+                if sharpness > sharpest { sharpest = sharpness; raw = trial }
+            }
+            var p = [Double](repeating: 0, count: rows)
+            for y in 0..<rows {
+                p[y] = raw[y] * 0.5 + (y > 0 ? raw[y - 1] * 0.25 : 0) + (y < rows - 1 ? raw[y + 1] * 0.25 : 0)
+            }
+            let mean = p.reduce(0, +) / Double(rows)
+            guard mean > 0 else { continue }
+            lines += p.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(rows) / (mean * mean + 1e-6)
+            // the body of each line of print: rows of more than half the usual full row of ink
+            let sorted = p.sorted()
+            let at = 0.85 * Double(rows - 1), low = Int(at), high = min(low + 1, rows - 1)
+            let threshold = (sorted[low] + (sorted[high] - sorted[low]) * (at - Double(low))) * 0.5
+            var y = 0
+            while y < rows {
+                guard p[y] > threshold else { y += 1; continue }
+                var end = y
+                while end < rows, p[end] > threshold { end += 1 }
+                if y > 0, end < rows, (3...30).contains(end - y) {
+                    let reach = max(2, (end - y) / 2)
+                    above += p[max(0, y - reach)..<y].reduce(0, +)
+                    below += p[end..<min(rows, end + reach)].reduce(0, +)
+                }
+                y = end
+            }
+        }
+        return InkReading(lines: lines / Double(strips), lean: above / (below + 1))
+    }
+    /// Which way round to hold a page, from its ink read four ways, each a quarter turn on from the last.
+    /// nil if the way it came is as good as any.
+    static func turnFromInk(_ r: [InkReading]) -> Int? {
+        guard r.count == 4 else { return nil }
+        // rows of print across the other way: certainly on its side, so the only question is which side
+        if min(r[1].lines, r[3].lines) > max(r[0].lines, r[2].lines) * 2 { return r[1].lean >= r[3].lean ? 1 : 3 }
+        guard let top = r.map({ $0.lean }).max(), let best = r.firstIndex(where: { $0.lean == top }), best != 0 else { return nil }
+        return top >= 1.08 && top >= r[0].lean + 0.1 && r[best].lines >= r[0].lines * 0.8 ? best : nil
+    }
+
     /// The spaces-apart pieces of a line.
     static func wordRanges(_ s: String) -> [Range<String.Index>] {
         var out: [Range<String.Index>] = []
@@ -4876,15 +5090,157 @@ struct MarkedPassage {
     let boxes: [CGRect]
     let text: String
     let marginNotes: [String]
+    var tags: [String] = []
+    var corrected: String? = nil    // the exact text, when Claude has read the page
+    var termOnly = false            // made just to hold a tag: no yellow mark beside it
+}
+
+/// Words you put in big pen parentheses, with where they are on the page.
+struct KeyTerm {
+    let tag: String
+    let box: CGRect
+    let text: String
+    var boxes: [CGRect]? = nil      // one per line, when it's known to run across lines
 }
 
 /// Finds marked passages in a page's pixels. A yellow streak says "look here"; the pen underlines beside it say
 /// where the passage starts and ends, because the streak itself is drawn roughly. Underlines with no yellow beside
 /// them are left alone. `rgba` is 4 bytes a pixel, top row first.
 enum BookMarks {
-    /// The note a passage starts with: only your handwriting beside it, if any was found.
+    /// The note a passage starts with: its #tags, and your handwriting beside it, if any was found.
     static func comment(_ p: MarkedPassage) -> String {
-        p.marginNotes.isEmpty ? "" : "Margin note (uncertain): " + p.marginNotes.joined(separator: " ")
+        var parts = p.tags.map { "#" + $0 }
+        if !p.marginNotes.isEmpty { parts.append("Margin note (uncertain): " + p.marginNotes.joined(separator: " ")) }
+        return parts.joined(separator: "\n")
+    }
+
+    /// A tag from the words inside parentheses: lower case, hyphens for spaces, no leading "a" or "the". It stops at
+    /// punctuation that ends the term. nil if nothing in it is a real word (a stray mark around "of the").
+    static func tag(_ words: [String], whole: Bool = false) -> (tag: String, used: Int)? {
+        var kept: [String] = []
+        var used = 0
+        for w in words {
+            used += 1
+            let clean = w.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" }.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            if !clean.isEmpty { kept.append(clean) }
+            if !whole, let end = w.last, ")]:;,.!?".contains(end) { break }
+        }
+        let small: Set<String> = ["a", "an", "the", "of", "to", "and", "or", "in", "on", "by", "for", "at", "as", "with", "its", "their", "that", "this", "which", "these", "those"]
+        while let f = kept.first, small.contains(f) { kept.removeFirst() }
+        while let l = kept.last, small.contains(l) { kept.removeLast() }
+        guard kept.contains(where: { $0.count >= 5 && !small.contains($0) }) else { return nil }
+        return (kept.joined(separator: "-"), used)
+    }
+
+    /// Finds words in big pen parentheses. A parenthesis is a dark stroke taller than the print that bows outward: left
+    /// for "(", right for ")". The bow is what tells it from a margin line or a printed stem.
+    static func keyTerms(rgba: [UInt8], width w: Int, height h: Int, lines: [OCRLine]) -> [KeyTerm] {
+        guard w > 0, h > 0, rgba.count >= w * h * 4 else { return [] }
+        let printed = lines.filter { $0.words.count >= 3 }
+        // sizes come from the distance between lines: how tall a word's box is depends on what measured it
+        let middles = printed.map { (1 - $0.box.midY) * CGFloat(h) }.sorted()
+        let gaps = zip(middles, middles.dropFirst()).map { $1 - $0 }.filter { $0 > CGFloat(h) / 200 }.sorted()
+        guard !gaps.isEmpty else { return [] }
+        let lineGap = gaps[gaps.count / 2]
+        let wordHeight = lineGap * 0.72, tallest = max(8, Int(wordHeight * 1.25))
+        // pen and print: darker than their surroundings
+        var gray = [Int](repeating: 0, count: w * h)
+        for i in 0..<(w * h) { gray[i] = Int(rgba[i * 4]) + Int(rgba[i * 4 + 1]) + Int(rgba[i * 4 + 2]) }
+        var sum = [Int](repeating: 0, count: (w + 1) * (h + 1))
+        for y in 0..<h {
+            var row = 0
+            for x in 0..<w {
+                row += gray[y * w + x]
+                sum[(y + 1) * (w + 1) + x + 1] = sum[y * (w + 1) + x + 1] + row
+            }
+        }
+        let radius = max(3, h * 25 / 2400)
+        var dark = [Bool](repeating: false, count: w * h)
+        for y in 0..<h {
+            let y0 = max(0, y - radius), y1 = min(h, y + radius + 1)
+            for x in 0..<w {
+                let x0 = max(0, x - radius), x1 = min(w, x + radius + 1)
+                let total = sum[y1 * (w + 1) + x1] - sum[y0 * (w + 1) + x1] - sum[y1 * (w + 1) + x0] + sum[y0 * (w + 1) + x0]
+                dark[y * w + x] = gray[y * w + x] * (x1 - x0) * (y1 - y0) * 100 < total * 80
+            }
+        }
+        // for each dark pixel, the longest stroke ending there, allowed to lean a little on each row
+        let steps = [0, 1, -1, 2, -2]
+        var length = [Int32](repeating: 0, count: w * h)
+        var from = [Int8](repeating: 0, count: w * h)
+        for x in 0..<w where dark[x] { length[x] = 1 }
+        for y in 1..<h {
+            for x in 0..<w where dark[y * w + x] {
+                var best: Int32 = 0, step: Int8 = 0
+                for (k, s) in steps.enumerated() {
+                    let px = x - s
+                    if px >= 0, px < w, length[(y - 1) * w + px] > best { best = length[(y - 1) * w + px]; step = Int8(k) }
+                }
+                length[y * w + x] = best + 1
+                from[y * w + x] = step
+            }
+        }
+        // take the longest strokes first, and trace each back to measure its bow
+        struct Stroke { let left: Int, right: Int, top: Int, bottom: Int, bow: Double }
+        var ends: [Int] = []
+        for i in 0..<(w * h) where Int(length[i]) >= tallest { ends.append(i) }
+        ends.sort { length[$0] > length[$1] }
+        var taken = [Bool](repeating: false, count: (h / 8 + 2) * (w / 8 + 2))
+        let cells = w / 8 + 2
+        var strokes: [Stroke] = []
+        for e in ends {
+            let y = e / w, x = e % w
+            if taken[(y / 8) * cells + x / 8] { continue }
+            let n = Int(length[e])
+            var path: [Int] = []
+            var px = x, py = y
+            for _ in 0..<n {
+                path.append(px)
+                px -= steps[Int(from[py * w + px])]
+                py -= 1
+                if px < 0 || px >= w || py < 0 { break }
+            }
+            path.reverse()
+            let low = path.min() ?? x, high = path.max() ?? x
+            for row in max(0, (y - n) / 8)...(y / 8) {
+                for col in max(0, low / 8 - 1)...min(cells - 1, high / 8 + 1) { taken[row * cells + col] = true }
+            }
+            guard let first = path.first, let last = path.last else { continue }
+            let bow = Double(path[path.count / 2]) - Double(first + last) / 2
+            strokes.append(Stroke(left: low, right: high, top: y - n, bottom: y, bow: bow))
+        }
+        var out: [KeyTerm] = []
+        for line in printed {
+            let middle = Int((1 - line.box.midY) * CGFloat(h))
+            let a = Int(line.box.minX * CGFloat(w)), b = Int(line.box.maxX * CGFloat(w)), slack = Int(wordHeight)
+            let here = strokes.filter { $0.top < middle && middle < $0.bottom && $0.left >= a - slack && $0.left <= b + slack }
+            let rights = here.filter { $0.bow >= 3 }.map { $0.right }.sorted()
+            var seen = Set<String>()
+            for l in here.filter({ $0.bow <= -3 }).map({ $0.left }).sorted() {
+                guard let r = rights.first(where: { $0 > l + slack }) else { continue }
+                let inside = line.words.filter { let c = Int($0.box.midX * CGFloat(w)); return c > l && c < r }
+                guard !inside.isEmpty, inside.count <= 6, let t = tag(inside.map { $0.text }), seen.insert(t.tag).inserted,
+                      let one = inside.first else { continue }
+                let used = inside.prefix(t.used)
+                out.append(KeyTerm(tag: t.tag, box: used.dropFirst().reduce(one.box) { $0.union($1.box) }, text: used.map { $0.text }.joined(separator: " ")))
+            }
+        }
+        return out.count > 5 ? [] : out      // that many on a page means a dark or blurred photo, not parentheses
+    }
+
+    /// Puts each term's tag on the passage it's inside; a term in no passage gets a small highlight of its own.
+    static func attach(_ terms: [KeyTerm], to passages: [MarkedPassage]) -> [MarkedPassage] {
+        var out = passages
+        for t in terms {
+            let centre = CGPoint(x: t.box.midX, y: t.box.midY)
+            if let i = out.firstIndex(where: { p in p.boxes.contains { $0.insetBy(dx: -0.01, dy: -0.004).contains(centre) } }) {
+                if !out[i].tags.contains(t.tag) { out[i].tags.append(t.tag) }
+            } else {
+                out.append(MarkedPassage(boxes: t.boxes ?? [t.box], text: t.text, marginNotes: [], tags: [t.tag],
+                                         corrected: t.boxes == nil ? nil : t.text, termOnly: true))
+            }
+        }
+        return out
     }
 
     /// A corrected quote is kept after your note in the highlight's comment, so it stays in the PDF and is searchable.
@@ -4987,7 +5343,7 @@ enum BookMarks {
         return covered * 2 >= x1 - x0
     }
 
-    static func passages(rgba: [UInt8], width w: Int, height h: Int, lines: [OCRLine]) -> [MarkedPassage] {
+    static func passages(rgba: [UInt8], width w: Int, height h: Int, lines: [OCRLine], underlines: Bool = true) -> [MarkedPassage] {
         guard w > 0, h > 0, rgba.count >= w * h * 4 else { return [] }
         let found = streaks(rgba: rgba, width: w, height: h)
         guard !found.isEmpty else { return [] }
@@ -5006,7 +5362,7 @@ enum BookMarks {
                 return row(l) >= CGFloat(s.top) - pad && row(l) <= CGFloat(s.bottom) + pad
             }
             let near = lines.filter { !inMargin($0) && beside($0, 0.5) }.sorted { row($0) < row($1) }
-            let marks = near.map { l in l.words.map { underlined($0, strokes: ink, width: w, height: h) } }
+            let marks = near.map { l in l.words.map { underlines && underlined($0, strokes: ink, width: w, height: h) } }
             var chosen: [(line: OCRLine, from: Int)] = []
             // one stray word doesn't start a passage: the first line needs two
             let start = marks.firstIndex { m in m.filter { $0 }.count >= 2 } ?? marks.firstIndex { $0.contains(true) }
@@ -5029,6 +5385,558 @@ enum BookMarks {
             out.append(MarkedPassage(boxes: boxes, text: words.joined(separator: " "), marginNotes: notes))
         }
         return out
+    }
+}
+
+/// What Claude read from a page photo, if you've added an API key in Settings.
+struct ClaudePage {
+    var number: String?
+    var passages: [(text: String, note: String)]
+    var terms: [String]
+    var before: [String] = []       // for each term, the printed words just before it
+}
+
+/// The request and reply for Claude reading a page, kept apart from the network so --selftest can check them.
+enum ClaudeReading {
+    static func prompt(style: MarkingStyle = .mine) -> String {
+        let number = style.handwrittenPageNumbers ? "printed or written in by hand (for example P95 means 95)" : "as printed"
+        let terms = style.parenthesisTags
+            ? "one object for each word or phrase the reader enclosed in big hand-drawn parentheses or a hand-drawn circle: {\"term\": ..., \"before\": ...}. term: all the printed words inside the marks, exactly as printed, from just after the opening mark to just before the closing mark, even across lines. before: the three printed words just before the term. Ignore printed parentheses. An empty list if there are none."
+            : "an empty list."
+        var passages = "an empty list."
+        if style.marginStreaks {
+            let extent = style.underlines
+                ? "Each passage runs from the first printed word the pen underline reaches beside the streak to the last underlined word. Follow the pen line from line to line: it can wander or cut through the letters. If it carries on past the end of the streak without a break, keep following it to where it stops. Leave out words beside the streak with no underline. If nothing beside the streak is underlined, take the whole lines beside it."
+                : "Each passage is the whole lines beside the streak."
+            passages = """
+            one object for each coloured streak in the margin, top to bottom, including pale or short ones: {"text": ..., "note": ...}. Two streaks are two passages, even when close together.
+            \(extent)
+            text: the exact printed words of that passage, with its printed spelling, accents and punctuation, and with no line-end hyphens. Leave out footnote numbers.
+            note: everything written or drawn by hand in the margin beside that passage: words as written, a star as *, a question mark as ?, an arrow as →. An empty string if there is nothing.
+            """
+        }
+        var s = """
+        This is a photo of a page from a printed book that a reader may have marked. Look closely: the pen lines are thin. Reply with JSON only, no other text:
+        {"page": ..., "terms": [...], "passages": [...]}
+
+        page: the page number, \(number), as a string of digits or lower-case roman numerals. null if there is none.
+        terms: \(terms)
+        passages: \(passages)
+        """
+        let more = style.noteForClaude.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !more.isEmpty { s += "\n\nHow this reader marks pages, in their own words: " + more }
+        return s
+    }
+
+    /// Reads Claude's reply, tolerating anything around the JSON. nil if it can't be understood.
+    static func parse(_ reply: String) -> ClaudePage? {
+        guard let a = reply.firstIndex(of: "{"), let b = reply.lastIndex(of: "}"), a < b,
+              let data = String(reply[a...b]).data(using: .utf8),
+              let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        var number = (j["page"] as? String)?.trimmingCharacters(in: .whitespaces).lowercased()
+        if let n = j["page"] as? Int { number = String(n) }
+        if let n = number, BookPages.rank(n) == nil || n == BookPages.cover || n == BookPages.front { number = nil }
+        let raw = (j["terms"] as? [Any]) ?? []
+        let terms = raw.map { ($0 as? String) ?? (($0 as? [String: Any])?["term"] as? String) ?? "" }
+        let before = raw.map { (($0 as? [String: Any])?["before"] as? String) ?? "" }
+        let passages = ((j["passages"] as? [[String: Any]]) ?? []).map {
+            (text: ($0["text"] as? String) ?? "", note: ($0["note"] as? String) ?? "")
+        }
+        return ClaudePage(number: number, passages: passages, terms: terms, before: before)
+    }
+
+    /// The page's words in reading order, broken at punctuation, so "politics—which" matches however it was read.
+    private struct Piece { let text: [UInt32]; let row: Int; let word: Int }
+    private static func rows(_ lines: [OCRLine]) -> [[OCRWord]] {
+        var out: [[OCRWord]] = []
+        var last: OCRLine?
+        for l in lines.sorted(by: { $0.box.midY > $1.box.midY }) {
+            if let p = last, !out.isEmpty, abs(p.box.midY - l.box.midY) < min(p.box.height, l.box.height) / 2 { out[out.count - 1] += l.words }
+            else { out.append(l.words) }
+            last = l
+        }
+        return out.map { $0.sorted { $0.box.minX < $1.box.minX } }
+    }
+    private static func pieces(_ text: String) -> [[UInt32]] {
+        BibIndex.fold(text).split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { $0.unicodeScalars.map { $0.value } }
+    }
+    /// Close enough to be the same word misread: 2 for the same, 1 for a slip or two, -1 for different.
+    private static func likeness(_ a: [UInt32], _ b: [UInt32]) -> Int {
+        if a == b { return 2 }
+        guard min(a.count, b.count) >= 4, abs(a.count - b.count) <= 2 else { return -1 }
+        var row = Array(0...b.count)
+        for i in 1...a.count {
+            var previous = row[0]
+            row[0] = i
+            for j in 1...b.count {
+                let saved = row[j]
+                row[j] = min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] == b[j - 1] ? 0 : 1))
+                previous = saved
+            }
+        }
+        return row[b.count] * 4 <= max(a.count, b.count) ? 1 : -1
+    }
+    /// Every place these words appear on the page, best first, none overlapping.
+    private static func places(_ wanted: [[UInt32]], in page: [Piece]) -> [(start: Int, end: Int, score: Int)] {
+        let n = wanted.count, m = page.count
+        guard n > 0, m > 0 else { return [] }
+        var score = [Int](repeating: 0, count: m + 1), from = Array(0...m)
+        for i in 1...n {
+            var nextScore = [Int](repeating: -i, count: m + 1), nextFrom = from
+            for j in 1...m {
+                let across = score[j - 1] + likeness(wanted[i - 1], page[j - 1].text)
+                let down = score[j] - 1, along = nextScore[j - 1] - 1
+                if across >= down && across >= along { nextScore[j] = across; nextFrom[j] = from[j - 1] }
+                else if down >= along { nextScore[j] = down; nextFrom[j] = from[j] }
+                else { nextScore[j] = along; nextFrom[j] = nextFrom[j - 1] }
+            }
+            score = nextScore; from = nextFrom
+        }
+        var found = (1...m).filter { score[$0] >= max(2, n) && from[$0] < $0 }.map { (start: from[$0], end: $0 - 1, score: score[$0]) }
+        found.sort { $0.score != $1.score ? $0.score > $1.score : $0.start < $1.start }
+        var kept: [(start: Int, end: Int, score: Int)] = []
+        for f in found where !kept.contains(where: { $0.start <= f.end && f.start <= $0.end }) { kept.append(f) }
+        return kept
+    }
+    /// One box for each line these pieces of the page cover, top line first.
+    private static func boxes(_ start: Int, _ end: Int, _ page: [Piece], _ rows: [[OCRWord]]) -> [CGRect] {
+        var out: [CGRect] = []
+        var i = start
+        while i <= end {
+            let row = page[i].row, first = page[i].word
+            var last = first
+            while i <= end, page[i].row == row { last = page[i].word; i += 1 }
+            let words = rows[row][first...last]
+            if let one = words.first { out.append(words.dropFirst().reduce(one.box) { $0.union($1.box) }) }
+        }
+        return out
+    }
+    private static func index(_ rows: [[OCRWord]]) -> [Piece] {
+        var page: [Piece] = []
+        for (r, row) in rows.enumerated() {
+            for (w, word) in row.enumerated() { page += pieces(word.text).map { Piece(text: $0, row: r, word: w) } }
+        }
+        return page
+    }
+
+    /// Where a passage is on the page, one box per line. The words came from Claude and the positions from the Mac's
+    /// reading, so they're matched allowing for misread words. Empty if it can't be found.
+    static func locate(_ text: String, in lines: [OCRLine]) -> [CGRect] {
+        let layout = rows(lines), page = index(layout)
+        guard let best = places(pieces(text), in: page).first else { return [] }
+        return boxes(best.start, best.end, page, layout)
+    }
+    /// Where a term is. The words before it tell one appearance from another.
+    static func locate(term: String, before: String, in lines: [OCRLine]) -> [CGRect] {
+        let layout = rows(lines), page = index(layout)
+        let found = places(pieces(term), in: page)
+        let context = pieces(before)
+        func fit(_ f: (start: Int, end: Int, score: Int)) -> Int {
+            let lead = page[max(0, f.start - context.count - 2)..<f.start]
+            return context.filter { c in lead.contains { likeness($0.text, c) > 0 } }.count
+        }
+        guard let top = found.first else { return [] }
+        let best = found.reduce(top) { fit($1) > fit($0) ? $1 : $0 }
+        return boxes(best.start, best.end, page, layout)
+    }
+
+    static let longestTag = 12     // words
+
+    /// Uses what Claude read: which passages are marked and where they start and stop, their exact words, margin
+    /// notes and tags. What software found stays only if Claude found no passages at all.
+    static func apply(_ page: ClaudePage, to passages: [MarkedPassage], lines: [OCRLine]) -> [MarkedPassage] {
+        var out: [MarkedPassage] = []
+        for p in page.passages {
+            let text = p.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let note = p.note.trimmingCharacters(in: .whitespacesAndNewlines)
+            let found = locate(text, in: lines)
+            // a quote that can't be placed still shouldn't be lost: it goes on the top line
+            let boxes = found.isEmpty ? Array(lines.sorted { $0.box.midY > $1.box.midY }.prefix(1).map { $0.box }) : found
+            guard !boxes.isEmpty else { continue }
+            out.append(MarkedPassage(boxes: boxes, text: text, marginNotes: note.isEmpty ? [] : [note], tags: [], corrected: text))
+        }
+        if out.isEmpty {
+            out = passages.filter { !$0.termOnly }
+            out = out.map { MarkedPassage(boxes: $0.boxes, text: $0.text, marginNotes: $0.marginNotes, tags: [], corrected: $0.corrected) }
+        }
+        var terms: [KeyTerm] = []
+        for (i, t) in page.terms.enumerated() {
+            let words = t.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            let before = i < page.before.count ? page.before[i] : ""
+            let boxes = locate(term: t, before: before, in: lines)
+            guard let first = boxes.first else { continue }
+            // a whole sentence in parentheses is a passage, not a tag
+            if words.count > longestTag {
+                out.append(MarkedPassage(boxes: boxes, text: t, marginNotes: [], tags: [], corrected: t))
+                continue
+            }
+            guard let tag = BookMarks.tag(words, whole: true)?.tag else { continue }
+            terms.append(KeyTerm(tag: tag, box: first, text: t, boxes: boxes))
+        }
+        // a marked word that's also a tag needs only the one highlight
+        let same = Set(terms.map { BibIndex.fold($0.text) })
+        out.removeAll { $0.marginNotes.isEmpty && same.contains(BibIndex.fold($0.text)) }
+        return BookMarks.attach(terms, to: out)
+    }
+}
+
+
+/// How someone marks their books, so that one person's habits aren't built into the app. It's a small file in the
+/// Book Photos folder, which Settings edits. With no file, nothing is looked for and photos become plain pages.
+struct MarkingStyle: Codable, Equatable {
+    var marginStreaks = false           // a coloured streak in the margin marks a passage
+    var underlines = false              // pen underlines beside the streak pick out the exact words
+    var parenthesisTags = false         // big pen parentheses around a term make it a #tag
+    var handwrittenPageNumbers = false  // a page number written in by hand, like P95
+    var noteForClaude = ""              // anything else, in plain words, for Claude to go by
+
+    static let fileName = "Marking Style.json"
+    /// Everything on, the way the code was first written. Only the tests rely on it.
+    static var mine: MarkingStyle { MarkingStyle(marginStreaks: true, underlines: true, parenthesisTags: true, handwrittenPageNumbers: true) }
+    init(marginStreaks: Bool = false, underlines: Bool = false, parenthesisTags: Bool = false, handwrittenPageNumbers: Bool = false, noteForClaude: String = "") {
+        self.marginStreaks = marginStreaks; self.underlines = underlines; self.parenthesisTags = parenthesisTags
+        self.handwrittenPageNumbers = handwrittenPageNumbers; self.noteForClaude = noteForClaude
+    }
+    /// A file edited by hand can leave things out: whatever's missing counts as off.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        marginStreaks = (try? c.decode(Bool.self, forKey: .marginStreaks)) ?? false
+        underlines = (try? c.decode(Bool.self, forKey: .underlines)) ?? false
+        parenthesisTags = (try? c.decode(Bool.self, forKey: .parenthesisTags)) ?? false
+        handwrittenPageNumbers = (try? c.decode(Bool.self, forKey: .handwrittenPageNumbers)) ?? false
+        noteForClaude = (try? c.decode(String.self, forKey: .noteForClaude)) ?? ""
+    }
+    static func load(from folder: String) -> MarkingStyle {
+        guard let d = FileManager.default.contents(atPath: folder + "/" + fileName),
+              let s = try? JSONDecoder().decode(MarkingStyle.self, from: d) else { return MarkingStyle() }
+        return s
+    }
+    @discardableResult func save(to folder: String) -> Bool {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let d = try? e.encode(self), (try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)) != nil else { return false }
+        return (try? d.write(to: URL(fileURLWithPath: folder + "/" + MarkingStyle.fileName), options: .atomic)) != nil
+    }
+}
+
+/// Straightens a photographed page using its own lines of print, which ought to be straight and level. Works out how
+/// the photo bends them, and undoes that: gently, on this Mac, moving the pixels and adding nothing, so pen marks survive.
+enum PageFlattener {
+    struct Model {
+        var degree: Int
+        var px: [Double], py: [Double]              // where each straight point came from in the photo
+        var left: Double, right: Double, top: Double, bottom: Double     // the text block once straight
+    }
+    private static func powers(_ degree: Int) -> [(Int, Int)] {
+        var out: [(Int, Int)] = []
+        for i in 0...degree { for j in 0...degree where i + j <= degree + 1 { out.append((i, j)) } }
+        return out
+    }
+    private static func basis(_ u: Double, _ v: Double, _ m: (left: Double, right: Double, top: Double, bottom: Double), _ terms: [(Int, Int)]) -> [Double] {
+        let a = (u - (m.left + m.right) / 2) / max((m.right - m.left) / 2, 1), b = (v - (m.top + m.bottom) / 2) / max((m.bottom - m.top) / 2, 1)
+        var ua = [1.0], vb = [1.0]
+        for k in 1..<8 { ua.append(ua[k - 1] * a); vb.append(vb[k - 1] * b) }
+        return terms.map { ua[$0.0] * vb[$0.1] }
+    }
+    /// Solves the best fit of rows × answer = wanted. nil if the rows don't pin it down.
+    private static func solve(_ rows: [[Double]], _ wanted: [[Double]]) -> [[Double]]? {
+        guard let n = rows.first?.count else { return nil }
+        let answers = wanted.count
+        var a = [[Double]](repeating: [Double](repeating: 0, count: n + answers), count: n)
+        for (r, row) in rows.enumerated() {
+            for i in 0..<n {
+                for j in 0..<n { a[i][j] += row[i] * row[j] }
+                for k in 0..<answers { a[i][n + k] += row[i] * wanted[k][r] }
+            }
+        }
+        for i in 0..<n { a[i][i] += 1e-9 * Double(rows.count) }
+        for i in 0..<n {
+            var pivot = i
+            for r in i..<n where abs(a[r][i]) > abs(a[pivot][i]) { pivot = r }
+            guard abs(a[pivot][i]) > 1e-12 else { return nil }
+            a.swapAt(i, pivot)
+            for r in 0..<n where r != i {
+                let f = a[r][i] / a[i][i]
+                if f != 0 { for c in i..<(n + answers) { a[r][c] -= f * a[i][c] } }
+            }
+        }
+        return (0..<answers).map { k in (0..<n).map { a[$0][n + k] / a[$0][$0] } }
+    }
+    private static func median(_ xs: [Double]) -> Double { let s = xs.sorted(); return s.isEmpty ? 0 : s[s.count / 2] }
+
+    /// The edge of the text block: where most lines end, line by line. Short lines and indents are ignored.
+    private static func edge(_ ends: [Double], rows: [Double], outward: Double, tolerance: Double) -> [Double]? {
+        let order = rows.indices.sorted { rows[$0] < rows[$1] }
+        let bands = 5
+        guard order.count >= bands * 2 else { return nil }
+        var points: [(y: Double, x: Double)] = []
+        for b in 0..<bands {
+            let part = order[(b * order.count / bands)..<((b + 1) * order.count / bands)]
+            let xs = part.map { ends[$0] * outward }.sorted()
+            points.append((rows[part[part.startIndex + part.count / 2]], xs[xs.count * 4 / 5] * outward))
+        }
+        let mid = median(rows), span = max((rows.max() ?? 1) - (rows.min() ?? 0), 1)
+        func term(_ y: Double) -> Double { (y - mid) / span }
+        guard var c = solve(points.map { [1, term($0.y)] }, [points.map { $0.x }])?.first else { return nil }
+        c.append(0)
+        for _ in 0..<3 {
+            func at(_ y: Double) -> Double { c[0] + c[1] * term(y) + c[2] * term(y) * term(y) }
+            let near = rows.indices.filter { abs(ends[$0] - at(rows[$0])) < tolerance }
+            guard near.count >= 6, let f = solve(near.map { [1, term(rows[$0]), term(rows[$0]) * term(rows[$0])] }, [near.map { ends[$0] }])?.first else { return nil }
+            c = f
+        }
+        return [c[0], c[1], c[2], mid, span]
+    }
+    private static func edgeAt(_ c: [Double], _ y: Double) -> Double { let t = (y - c[3]) / c[4]; return c[0] + c[1] * t + c[2] * t * t }
+
+    /// Works out how the page is bent. nil if there isn't enough print to go on, or the answer isn't believable.
+    static func fit(_ lines: [OCRLine], width w: Int, height h: Int) -> Model? {
+        // left and right ends of each word, in pixels from the top left; a line with no real word positions says nothing
+        struct Line { var x0: [Double], x1: [Double], y: [Double] }
+        let W = Double(w), H = Double(h)
+        let all: [Line] = lines.compactMap { l in
+            let ws = l.words.filter { $0.box.width > 0 }.sorted { $0.box.minX < $1.box.minX }
+            guard ws.count >= 3 else { return nil }
+            let ys = ws.map { (1 - Double($0.box.midY)) * H }
+            if ws.count >= 5, Set(ys).count == 1 { return nil }
+            return Line(x0: ws.map { Double($0.box.minX) * W }, x1: ws.map { Double($0.box.maxX) * W }, y: ys)
+        }
+        let wide = all.filter { $0.y.count >= 5 }
+        guard wide.count >= 10 else { return nil }
+        let a0 = median(wide.compactMap { $0.x0.first }), b0 = median(wide.compactMap { $0.x1.last })
+        let column = b0 - a0
+        guard column > W * 0.3 else { return nil }
+        // only this page's text: a neighbouring page's lines start past it
+        let body = all.filter { l in
+            guard let s = l.x0.first, let e = l.x1.last else { return false }
+            return s < b0 - column * 0.25 && e > a0 && e < b0 + column * 0.12 && s > a0 - column * 0.12
+        }
+        guard body.count >= 10 else { return nil }
+        let xm = (a0 + b0) / 2
+        let rows: [Double] = body.map { l in
+            let cx = zip(l.x0, l.x1).map { ($0 + $1) / 2 }
+            let n = Double(cx.count), mx = cx.reduce(0, +) / n, my = l.y.reduce(0, +) / n
+            let d = cx.reduce(0) { $0 + ($1 - mx) * ($1 - mx) }
+            let slope = d > 0 ? zip(cx, l.y).reduce(0) { $0 + ($1.0 - mx) * ($1.1 - my) } / d : 0
+            return my + slope * (min(max(xm, cx.min() ?? xm), cx.max() ?? xm) - mx)
+        }
+        guard let cL = edge(body.compactMap { $0.x0.first }, rows: rows, outward: -1, tolerance: column * 0.03),
+              let cR = edge(body.compactMap { $0.x1.last }, rows: rows, outward: 1, tolerance: column * 0.03) else { return nil }
+        let middle = median(rows), XL = edgeAt(cL, middle), XR = edgeAt(cR, middle)
+        guard XR - XL > column * 0.7 else { return nil }
+        var ids: [Int] = [], sx: [Double] = [], sy: [Double] = []
+        for (i, l) in body.enumerated() {
+            for k in l.y.indices { for x in [l.x0[k], l.x1[k]] { ids.append(i); sx.append(x); sy.append(l.y[k]) } }
+        }
+        func attempt(_ degree: Int) -> Model? {
+            let terms = powers(degree)
+            var rows = rows
+            var keep = [Bool](repeating: true, count: sx.count)
+            var px: [Double] = [], py: [Double] = []
+            var frame = (left: XL, right: XR, top: rows.min() ?? 0, bottom: rows.max() ?? H)
+            for _ in 0..<8 {
+                frame = (XL, XR, rows.min() ?? 0, rows.max() ?? H)
+                let us: [Double] = sx.indices.map { i in
+                    let y = rows[ids[i]], l = edgeAt(cL, y), r = edgeAt(cR, y)
+                    return XL + (sx[i] - l) / max(r - l, 1) * (XR - XL)
+                }
+                let table = sx.indices.map { basis(us[$0], rows[ids[$0]], frame, terms) }
+                let used = sx.indices.filter { keep[$0] }
+                guard used.count > terms.count * 4,
+                      let f = solve(used.map { table[$0] }, [used.map { sx[$0] }, used.map { sy[$0] }]) else { return nil }
+                px = f[0]; py = f[1]
+                var ex = [Double](repeating: 0, count: sx.count), ey = ex
+                for i in sx.indices {
+                    ex[i] = zip(table[i], px).reduce(0) { $0 + $1.0 * $1.1 } - sx[i]
+                    ey[i] = zip(table[i], py).reduce(0) { $0 + $1.0 * $1.1 } - sy[i]
+                }
+                var off = [[Double]](repeating: [], count: body.count)
+                for i in used { off[ids[i]].append(ey[i]) }
+                for i in rows.indices where off[i].count >= 2 { rows[i] -= median(off[i]) }
+                let errors = sx.indices.map { (ex[$0] * ex[$0] + ey[$0] * ey[$0]).squareRoot() }
+                let sigma = median(used.map { errors[$0] }) * 1.48
+                for i in sx.indices { keep[i] = errors[i] < max(3 * sigma, H * 0.002) }
+            }
+            let m = Model(degree: degree, px: px, py: py, left: frame.left, right: frame.right, top: frame.top, bottom: frame.bottom)
+            return believable(m, height: H) ? m : nil
+        }
+        return attempt(3) ?? attempt(2)
+    }
+    private static func source(_ m: Model, _ terms: [(Int, Int)], _ u: Double, _ v: Double) -> (x: Double, y: Double) {
+        let c = min(max(u, m.left), m.right), d = min(max(v, m.top), m.bottom)
+        let b = basis(c, d, (m.left, m.right, m.top, m.bottom), terms)
+        return (zip(b, m.px).reduce(0) { $0 + $1.0 * $1.1 } + u - c, zip(b, m.py).reduce(0) { $0 + $1.0 * $1.1 } + v - d)
+    }
+    /// A page bends gently: nothing moves far, folds over, or is squeezed or stretched much.
+    private static func believable(_ m: Model, height H: Double) -> Bool {
+        let terms = powers(m.degree)
+        let n = 14
+        let du = (m.right - m.left) / Double(n), dv = (m.bottom - m.top) / Double(n)
+        guard du > 0, dv > 0 else { return false }
+        for i in 0...n {
+            for j in 0...n {
+                let u = m.left + du * Double(i), v = m.top + dv * Double(j)
+                let p = source(m, terms, u, v)
+                guard ((p.x - u) * (p.x - u) + (p.y - v) * (p.y - v)).squareRoot() < H * 0.15 else { return false }
+                if i < n { let g = (source(m, terms, u + du, v).x - p.x) / du; guard g > 0.55, g < 1.8 else { return false } }
+                if j < n { let g = (source(m, terms, u, v + dv).y - p.y) / dv; guard g > 0.7, g < 1.4 else { return false } }
+            }
+        }
+        return true
+    }
+
+    /// Makes the straightened picture. Anything that would come from beyond the photo is left white.
+    static func flatten(rgba: [UInt8], width w: Int, height h: Int, _ m: Model) -> [UInt8] {
+        let terms = powers(m.degree), step = 16
+        let gw = w / step + 2, gh = h / step + 2
+        var gx = [Float](repeating: 0, count: gw * gh), gy = gx
+        for j in 0..<gh {
+            for i in 0..<gw {
+                let p = source(m, terms, Double(i * step), Double(j * step))
+                gx[j * gw + i] = Float(p.x); gy[j * gw + i] = Float(p.y)
+            }
+        }
+        var out = [UInt8](repeating: 255, count: w * h * 4)
+        rgba.withUnsafeBufferPointer { src in
+            out.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<h {
+                    let j = y / step
+                    let fy = Float(y - j * step) / Float(step)
+                    for x in 0..<w {
+                        let i = x / step
+                        let fx = Float(x - i * step) / Float(step)
+                        let a = j * gw + i, b = a + 1, c = a + gw, d = c + 1
+                        let top = gx[a] + (gx[b] - gx[a]) * fx, low = gx[c] + (gx[d] - gx[c]) * fx
+                        let ox = top + (low - top) * fy
+                        let top2 = gy[a] + (gy[b] - gy[a]) * fx, low2 = gy[c] + (gy[d] - gy[c]) * fx
+                        let oy = top2 + (low2 - top2) * fy
+                        guard ox >= 0, oy >= 0, ox < Float(w - 1), oy < Float(h - 1) else { continue }
+                        let ix = Int(ox), iy = Int(oy)
+                        let tx = ox - Float(ix), ty = oy - Float(iy)
+                        let p = (iy * w + ix) * 4, q = p + w * 4
+                        for k in 0..<3 {
+                            let t = Float(src[p + k]) + (Float(src[p + 4 + k]) - Float(src[p + k])) * tx
+                            let l = Float(src[q + k]) + (Float(src[q + 4 + k]) - Float(src[q + k])) * tx
+                            dst[(y * w + x) * 4 + k] = UInt8(t + (l - t) * ty + 0.5)
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Makes the paper white and takes out shadows: each colour is divided by the bare paper around it, so pen and
+    /// print stay dark and yellow stays yellow, however dim the photo.
+    static func whiten(rgba: [UInt8], width w: Int, height h: Int) -> [UInt8] {
+        let s = 8, sw = w / s + 1, sh = h / s + 1
+        var out = rgba
+        var shape = [Double](repeating: 0, count: 4096)
+        for i in shape.indices { shape[i] = pow(Double(i) / 4095, 1.3) * 255 }
+        for k in 0..<3 {
+            // a small copy, the brightest nearby paper in it, softened
+            var small = [Float](repeating: 0, count: sw * sh), count = small
+            for y in 0..<h { for x in 0..<w { let c = y / s * sw + x / s; small[c] += Float(rgba[(y * w + x) * 4 + k]); count[c] += 1 } }
+            for i in small.indices where count[i] > 0 { small[i] /= count[i] }
+            func sweep(_ a: [Float], radius r: Int, combine: ([Float]) -> Float) -> [Float] {
+                var b = a
+                for y in 0..<sh {
+                    for x in 0..<sw {
+                        var part: [Float] = []
+                        for d in -r...r { let t = x + d; if t >= 0, t < sw { part.append(a[y * sw + t]) } }
+                        b[y * sw + x] = combine(part)
+                    }
+                }
+                var c = b
+                for y in 0..<sh {
+                    for x in 0..<sw {
+                        var part: [Float] = []
+                        for d in -r...r { let t = y + d; if t >= 0, t < sh { part.append(b[t * sw + x]) } }
+                        c[y * sw + x] = combine(part)
+                    }
+                }
+                return c
+            }
+            var paper = sweep(small, radius: 6) { $0.max() ?? 0 }
+            for _ in 0..<3 { paper = sweep(paper, radius: 4) { $0.reduce(0, +) / Float($0.count) } }
+            for y in 0..<h {
+                let v = Float(y) / Float(s), j = min(Int(v), sh - 2), fy = v - Float(j)
+                for x in 0..<w {
+                    let u = Float(x) / Float(s), i = min(Int(u), sw - 2), fx = u - Float(i)
+                    let a = j * sw + i
+                    let top = paper[a] + (paper[a + 1] - paper[a]) * fx, low = paper[a + sw] + (paper[a + sw + 1] - paper[a + sw]) * fx
+                    let bare = max(top + (low - top) * fy, 30)
+                    let p = (y * w + x) * 4 + k
+                    out[p] = UInt8(shape[min(4095, Int(Float(rgba[p]) / bare * 1.04 * 4095))] + 0.5)
+                }
+            }
+        }
+        return out
+    }
+
+    /// Where to trim a neighbouring page off the sides, as pixel columns. Trims only at the dark fold between pages, and
+    /// only if printed lines lie beyond it and no yellow does, so notes in the margin stay.
+    static func pageEdges(rgba: [UInt8], width w: Int, height h: Int, lines: [OCRLine]) -> (left: Int, right: Int) {
+        var out = (left: 0, right: w)
+        let wide = lines.filter { $0.words.count >= 5 }
+        guard wide.count >= 10, w > 40, h > 40 else { return out }
+        let W = Double(w)
+        let a0 = median(wide.map { Double($0.box.minX) * W }), b0 = median(wide.map { Double($0.box.maxX) * W })
+        let margin = (b0 - a0) * 0.01
+        // brightness of each column, over the middle of the page, softened so one pen line doesn't count as a fold
+        var level = [Double](repeating: 0, count: w)
+        for y in stride(from: h / 10, to: h * 9 / 10, by: 4) {
+            for x in 0..<w { let p = (y * w + x) * 4; level[x] += Double(rgba[p]) + Double(rgba[p + 1]) + Double(rgba[p + 2]) }
+        }
+        let r = max(4, w / 120)
+        var sum = [Double](repeating: 0, count: w + 1)
+        for x in 0..<w { sum[x + 1] = sum[x] + level[x] }
+        let soft = (0..<w).map { x -> Double in let a = max(0, x - r), b = min(w, x + r + 1); return (sum[b] - sum[a]) / Double(b - a) }
+        let paper = median(Array(soft[max(0, Int(a0))..<min(w, max(Int(a0) + 1, Int(b0)))]))
+        func yellow(_ range: Range<Int>) -> Bool {
+            var n = 0
+            for y in stride(from: 0, to: h, by: 3) {
+                for x in stride(from: range.lowerBound, to: range.upperBound, by: 3) {
+                    let p = (y * w + x) * 4
+                    let a = Int(rgba[p]), g = Int(rgba[p + 1]), b = Int(rgba[p + 2])
+                    if a > 140, g > 128, b * 100 < 62 * min(a, g) { n += 1 }
+                }
+            }
+            return n > 40
+        }
+        func spread(_ ls: [OCRLine]) -> Double { (ls.map { Double($0.box.midY) }.max() ?? 0) - (ls.map { Double($0.box.midY) }.min() ?? 0) }
+        let beyondR = lines.filter { Double($0.box.minX) * W > b0 + margin * 2 }
+        if beyondR.count >= 5, spread(beyondR) > 0.25, let near = beyondR.map({ Double($0.box.minX) * W }).min() {
+            let a = Int(b0 + margin), b = min(w, Int(near))
+            if a < b, let dark = (a..<b).min(by: { soft[$0] < soft[$1] }), soft[dark] < paper * 0.85 {
+                // never through a note: past anything that starts before the fold and runs across it
+                let across = lines.filter { Double($0.box.minX) * W < Double(dark) && Double($0.box.maxX) * W > Double(dark) }
+                let cut = Int(across.map { Double($0.box.maxX) * W }.max() ?? Double(dark)) + 4
+                if cut < b, !yellow(cut..<w) { out.right = cut }
+            }
+        }
+        let beyondL = lines.filter { Double($0.box.maxX) * W < a0 - margin * 2 }
+        if beyondL.count >= 5, spread(beyondL) > 0.25, let near = beyondL.map({ Double($0.box.maxX) * W }).max() {
+            let a = max(0, Int(near)), b = Int(a0 - margin)
+            if a < b, let dark = (a..<b).min(by: { soft[$0] < soft[$1] }), soft[dark] < paper * 0.85 {
+                let across = lines.filter { Double($0.box.minX) * W < Double(dark) && Double($0.box.maxX) * W > Double(dark) }
+                let cut = Int(across.map { Double($0.box.minX) * W }.min() ?? Double(dark)) - 4
+                if cut > a, !yellow(0..<cut) { out.left = cut }
+            }
+        }
+        return out
+    }
+
+    /// The same lines measured on the page after trimming. Anything left outside goes.
+    static func trimmed(_ lines: [OCRLine], width w: Int, left: Int, right: Int) -> [OCRLine] {
+        let a = CGFloat(left) / CGFloat(w), k = CGFloat(w) / CGFloat(max(right - left, 1))
+        func moved(_ b: CGRect) -> CGRect { CGRect(x: (b.minX - a) * k, y: b.minY, width: b.width * k, height: b.height) }
+        return lines.compactMap { l in
+            let words = l.words.filter { $0.box.midX > a && ($0.box.midX - a) * k < 1 }.map { OCRWord(text: $0.text, box: moved($0.box)) }
+            guard let first = words.first else { return nil }
+            return OCRLine(text: words.map { $0.text }.joined(separator: " "), box: words.dropFirst().reduce(first.box) { $0.union($1.box) }, words: words, confidence: l.confidence)
+        }
     }
 }
 
@@ -5066,11 +5974,76 @@ enum PageLabels {
 struct PagePhoto {
     let source: URL
     let jpeg: Data
+    let original: Data      // the page before whitening: what Claude reads, if you've added a key
     let lines: [OCRLine]
     let cropped: Bool
     var isbns: [String]
     var passages: [MarkedPassage] = []
     var text: String { lines.map { $0.text }.joined(separator: "\n") }
+}
+
+/// The optional Claude step. With an API key in Settings, each page photo is read by Claude for exact quotes,
+/// handwriting, parentheses and page numbers. With no key, nothing leaves the Mac. The key is kept in a private file
+/// rather than the Keychain, which would ask for permission again after every build.
+enum ClaudeReader {
+    static let model = "claude-sonnet-5-5"
+    private static var keyFile: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PDF Search/claude-api-key")
+    }
+    static var key: String? {
+        let k = (try? String(contentsOf: keyFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (k ?? "").isEmpty ? nil : k
+    }
+    static func setKey(_ key: String) {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fm = FileManager.default
+        if k.isEmpty { try? fm.removeItem(at: keyFile); return }
+        try? fm.createDirectory(at: keyFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? k.write(to: keyFile, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
+    }
+
+    static func read(_ photo: PagePhoto, key: String, style: MarkingStyle) async -> ClaudePage? {
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 180)
+        req.httpMethod = "POST"
+        req.setValue(key, forHTTPHeaderField: "x-api-key")
+        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        let body: [String: Any] = [
+            "model": model, "max_tokens": 4000,
+            "messages": [["role": "user", "content": [
+                ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": photo.original.base64EncodedString()]],
+                ["type": "text", "text": ClaudeReading.prompt(style: style)]
+            ] as [Any]]]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        req.httpBody = data
+        for attempt in 0..<5 {
+            var wait = attempt + 1
+            if let got = try? await URLSession.shared.data(for: req), let answer = got.1 as? HTTPURLResponse {
+                if answer.statusCode == 200 {
+                    if let j = (try? JSONSerialization.jsonObject(with: got.0)) as? [String: Any],
+                       let content = j["content"] as? [[String: Any]],
+                       let page = ClaudeReading.parse(content.compactMap { $0["text"] as? String }.joined()) { return page }
+                    problem = "its reply couldn't be understood"
+                } else if answer.statusCode == 429 || answer.statusCode >= 500 {     // busy: wait and try again
+                    problem = "the service was busy (\(answer.statusCode))"
+                    wait = max((attempt + 1) * 8, Int(answer.value(forHTTPHeaderField: "retry-after") ?? "") ?? 0)
+                } else {
+                    problem = "the service said no (\(answer.statusCode))"
+                    return nil
+                }
+            } else {
+                problem = "no connection"
+            }
+            try? await Task.sleep(nanoseconds: UInt64(min(wait, 60)) * 1_000_000_000)
+        }
+        return nil
+    }
+    /// Why the last page failed, for the message when a batch ends.
+    static var problem = ""
 }
 
 /// Everything that touches Apple's image and text recognition. All of it runs on this Mac.
@@ -5084,18 +6057,21 @@ enum BookPhotos {
     }
 
     /// Reads one photo: one page, or two if it shows an open book. Empty if the file can't be read as a picture.
-    static func read(_ url: URL) -> [PagePhoto] {
+    static func read(_ url: URL, style: MarkingStyle) -> [PagePhoto] {
         guard let raw = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else { return [] }
         let image = zeroed(raw)
         let crop = pageCrop(image)
         let (page, lines) = upright(crop ?? image)
         let printed = barcodes(image)
         func photo(_ i: CIImage, _ l: [OCRLine]) -> PagePhoto? {
-            // your marks are read from the photo as taken; the PDF gets the page with whitened paper
-            guard let original = jpeg(i), let j = jpeg(whitened(i)) else { return nil }
+            // your marks are read from the straightened photo; the PDF gets the same page with whitened paper
+            guard let page = straightened(i, l), let flat = picture(page.rgba, page.w, page.h),
+                  let white = picture(PageFlattener.whiten(rgba: page.rgba, width: page.w, height: page.h), page.w, page.h),
+                  let original = jpeg(CIImage(cgImage: flat)), let j = jpeg(CIImage(cgImage: white)) else { return nil }
             var found = printed
-            for n in BookPages.isbns(in: l.map { $0.text }.joined(separator: "\n")) where !found.contains(n) { found.append(n) }
-            return PagePhoto(source: url, jpeg: j, lines: l, cropped: crop != nil, isbns: found, passages: marked(original, l))
+            for n in BookPages.isbns(in: page.lines.map { $0.text }.joined(separator: "\n")) where !found.contains(n) { found.append(n) }
+            return PagePhoto(source: url, jpeg: j, original: original, lines: page.lines, cropped: crop != nil, isbns: found,
+                             passages: marked(original, clean: j, page.lines, style))
         }
         // wider than tall: an open book, if both halves are full of text
         if page.extent.width > page.extent.height * 1.1 {
@@ -5110,27 +6086,59 @@ enum BookPhotos {
         return photo(page, lines).map { [$0] } ?? []
     }
 
-    /// Removes shadows and whitens the paper. On grey photographed paper a highlight turns dark gold; on white
-    /// it's the same yellow as in any other PDF.
-    private static func whitened(_ image: CIImage) -> CIImage {
-        let out = image.applyingFilter("CIDocumentEnhancer", parameters: [:])
-        return out.extent.isEmpty || out.extent.isInfinite ? image : zeroed(out.cropped(to: image.extent))
+    /// Straightens a page by its lines of print and trims off any neighbouring page, then reads it again, so the words
+    /// sit exactly where they now are. A page that wouldn't read as well straightened stays as it was.
+    private static func straightened(_ image: CIImage, _ lines: [OCRLine]) -> (rgba: [UInt8], w: Int, h: Int, lines: [OCRLine])? {
+        guard let master = jpeg(image, quality: 0.95), let px = pixels(master) else { return nil }
+        var rgba = px.rgba, read = lines
+        let w = px.w, h = px.h
+        if let model = PageFlattener.fit(lines, width: w, height: h) {
+            let flat = PageFlattener.flatten(rgba: rgba, width: w, height: h, model)
+            if let shown = picture(flat, w, h) {
+                let again = recognise(CIImage(cgImage: shown))
+                if BookPages.readingScore(again) >= BookPages.readingScore(lines) * 0.9 { rgba = flat; read = again }
+            }
+        }
+        let keep = PageFlattener.pageEdges(rgba: rgba, width: w, height: h, lines: read)
+        guard keep.left > 0 || keep.right < w else { return (rgba, w, h, read) }
+        let width = keep.right - keep.left
+        var cut = [UInt8](repeating: 255, count: width * h * 4)
+        for y in 0..<h {
+            let from = (y * w + keep.left) * 4
+            cut.replaceSubrange((y * width * 4)..<((y + 1) * width * 4), with: rgba[from..<(from + width * 4)])
+        }
+        return (cut, width, h, PageFlattener.trimmed(read, width: w, left: keep.left, right: keep.right))
     }
 
-    /// The passages marked on a page of text.
-    private static func marked(_ jpeg: Data, _ lines: [OCRLine]) -> [MarkedPassage] {
-        guard lines.count >= 8, let source = CGDataProvider(data: jpeg as CFData),
+    private static func picture(_ rgba: [UInt8], _ w: Int, _ h: Int) -> CGImage? {
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData), let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: sRGB,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider,
+                       decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+    }
+
+    /// The passages marked on a page of text, going by how this person marks their books.
+    /// Yellow is read from the photo; pen parentheses from the whitened page, where they're clearest.
+    private static func marked(_ jpeg: Data, clean: Data, _ lines: [OCRLine], _ style: MarkingStyle) -> [MarkedPassage] {
+        guard lines.count >= 8 else { return [] }
+        let passages = style.marginStreaks ? pixels(jpeg).map { BookMarks.passages(rgba: $0.rgba, width: $0.w, height: $0.h, lines: lines, underlines: style.underlines) } ?? [] : []
+        let terms = style.parenthesisTags ? pixels(clean).map { BookMarks.keyTerms(rgba: $0.rgba, width: $0.w, height: $0.h, lines: lines) } ?? [] : []
+        return BookMarks.attach(terms, to: passages)
+    }
+
+    private static func pixels(_ jpeg: Data) -> (rgba: [UInt8], w: Int, h: Int)? {
+        guard let source = CGDataProvider(data: jpeg as CFData),
               let picture = CGImage(jpegDataProviderSource: source, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
-              let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return [] }
+              let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         let w = picture.width, h = picture.height
-        var pixels = [UInt8](repeating: 0, count: w * h * 4)
-        let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn: Bool = rgba.withUnsafeMutableBytes { raw in
             guard let c = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                     space: sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
             c.draw(picture, in: CGRect(x: 0, y: 0, width: w, height: h))
             return true
         }
-        return drawn ? BookMarks.passages(rgba: pixels, width: w, height: h, lines: lines) : []
+        return drawn ? (rgba, w, h) : nil
     }
 
     /// Writes marked passages onto a PDF page as Interesting highlights, one per passage, flagged to be checked.
@@ -5149,7 +6157,7 @@ enum BookPhotos {
                 return [NSValue(point: NSPoint(x: x0, y: y1)), NSValue(point: NSPoint(x: x1, y: y1)),
                         NSValue(point: NSPoint(x: x0, y: y0)), NSValue(point: NSPoint(x: x1, y: y0))]
             }
-            let note = BookMarks.comment(p)
+            let note = BookMarks.joinContents(note: BookMarks.comment(p), quote: p.corrected)
             if !note.isEmpty { a.contents = note }
             a.userName = NSFullUserName()
             a.modificationDate = Date()
@@ -5168,23 +6176,44 @@ enum BookPhotos {
         let share = BookPages.area([r.topLeft, r.topRight, r.bottomRight, r.bottomLeft])
         guard share > 0.2, share < 0.995 else { return nil }
         let size = image.extent.size
-        func v(_ p: CGPoint) -> CIVector { CIVector(x: p.x * size.width, y: p.y * size.height) }
+        // the shape found can cut across a curled corner, so it's opened out a little
+        let cx = (r.topLeft.x + r.topRight.x + r.bottomLeft.x + r.bottomRight.x) / 4
+        let cy = (r.topLeft.y + r.topRight.y + r.bottomLeft.y + r.bottomRight.y) / 4
+        func v(_ p: CGPoint) -> CIVector {
+            CIVector(x: min(1, max(0, cx + (p.x - cx) * 1.06)) * size.width, y: min(1, max(0, cy + (p.y - cy) * 1.06)) * size.height)
+        }
         let out = image.applyingFilter("CIPerspectiveCorrection", parameters: [
             "inputTopLeft": v(r.topLeft), "inputTopRight": v(r.topRight),
             "inputBottomRight": v(r.bottomRight), "inputBottomLeft": v(r.bottomLeft)])
         return out.extent.isInfinite || out.extent.isEmpty ? nil : zeroed(out)
     }
 
-    /// Reads the text; a phone held flat often saves the wrong way up, so if little is found, tries the other three turns.
+    /// Turns the page the right way up and reads it. A phone held flat saves pictures any way round, and the saved
+    /// orientation can't be trusted, so a small copy is read all four ways round.
     private static func upright(_ image: CIImage) -> (CIImage, [OCRLine]) {
-        var best = (image, recognise(image))
-        guard characters(best.1) < 200 else { return best }
-        for turn in [CGImagePropertyOrientation.right, .left, .down] {
-            let turned = zeroed(image.oriented(turn))
-            let lines = recognise(turned)
-            if characters(lines) > characters(best.1) { best = (turned, lines) }
+        let small = smallCopy(image)
+        // Vision reads sideways print almost as well as upright print, so the ink decides first
+        if let quarter = BookPages.turnFromInk(inkReadings(small)) {
+            let turned = zeroed(image.oriented(quarters[quarter]))
+            return (turned, recognise(turned))
         }
-        return best
+        let turns: [CGImagePropertyOrientation] = [.up, .right, .left, .down]
+        let turn = BookPages.bestTurn(turns.map { BookPages.readingScore(recognise(zeroed(small.oriented($0)))) })
+        let turned = turn == 0 ? image : zeroed(image.oriented(turns[turn]))
+        return (turned, recognise(turned))
+    }
+
+    private static let quarters: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
+
+    private static func smallCopy(_ image: CIImage) -> CIImage {
+        let scale = min(1, 1400 / max(image.extent.width, image.extent.height, 1))
+        return zeroed(image.transformed(by: CGAffineTransform(scaleX: scale, y: scale)))
+    }
+
+    private static func inkReadings(_ small: CIImage) -> [BookPages.InkReading] {
+        quarters.compactMap { q in
+            jpeg(zeroed(small.oriented(q)), quality: 0.9).flatMap(pixels).map { BookPages.inkReading(rgba: $0.rgba, width: $0.w, height: $0.h) }
+        }
     }
 
     private static func recognise(_ image: CIImage) -> [OCRLine] {
@@ -5205,7 +6234,7 @@ enum BookPhotos {
                 && !(ranges.count >= 3 && boxes.contains { ($0?.width ?? 0) > o.boundingBox.width * 0.9 })
             let words = good ? zip(ranges, boxes).map { OCRWord(text: String(s[$0]), box: $1 ?? o.boundingBox) }
                              : BookPages.spread(ranges.map { String(s[$0]) }, across: o.boundingBox)
-            out.append(OCRLine(text: s, box: o.boundingBox, words: words))
+            out.append(OCRLine(text: s, box: o.boundingBox, words: words, confidence: t.confidence))
         }
         return out
     }
@@ -5219,14 +6248,14 @@ enum BookPhotos {
         return (request.results ?? []).compactMap { $0.payloadStringValue }.compactMap(BookPages.isbn13)
     }
 
-    private static func jpeg(_ image: CIImage) -> Data? {
+    private static func jpeg(_ image: CIImage, quality level: CGFloat = 0.72) -> Data? {
         let long = max(image.extent.width, image.extent.height)
         let s = min(1, longSide / max(long, 1))
         let scaled = zeroed(image.transformed(by: CGAffineTransform(scaleX: s, y: s)))
         let box = CGRect(origin: .zero, size: CGSize(width: floor(scaled.extent.width), height: floor(scaled.extent.height)))
         guard box.width >= 1, box.height >= 1, let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         let quality = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
-        return context.jpegRepresentation(of: scaled.cropped(to: box), colorSpace: sRGB, options: [quality: 0.72])
+        return context.jpegRepresentation(of: scaled.cropped(to: box), colorSpace: sRGB, options: [quality: level])
     }
 
     /// A one-page PDF: the words first, then the picture on top of them. The words can't be seen, but search,
@@ -5472,16 +6501,64 @@ extension Library {
             return
         }
         Viewer.current?.flushSave()
+        let style = MarkingStyle.load(from: Library.photoInbox)
         let sorted = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         var photos: [PagePhoto] = []
         var unreadable: [URL] = []
-        for (i, u) in sorted.enumerated() {
-            showFlash("Reading photo \(i + 1) of \(sorted.count)…", seconds: 120)
-            let read = await Task.detached(priority: .userInitiated) { BookPhotos.read(u) }.value
-            if read.isEmpty { unreadable.append(u) }
-            photos += read
+        var read = [[PagePhoto]](repeating: [], count: sorted.count)
+        showFlash("Reading photo 1 of \(sorted.count)…", seconds: 120)
+        await withTaskGroup(of: (Int, [PagePhoto]).self) { group -> Void in     // four photos at a time, kept in order
+            var next = 0, finished = 0
+            while next < min(4, sorted.count) {
+                let i = next, u = sorted[i]
+                next += 1
+                group.addTask(priority: .userInitiated) { (i, BookPhotos.read(u, style: style)) }
+            }
+            while let done = await group.next() {
+                read[done.0] = done.1
+                finished += 1
+                showFlash("Reading photo \(min(finished + 1, sorted.count)) of \(sorted.count)…", seconds: 120)
+                if next < sorted.count {
+                    let i = next, u = sorted[i]
+                    next += 1
+                    group.addTask(priority: .userInitiated) { (i, BookPhotos.read(u, style: style)) }
+                }
+            }
         }
-        let numbers = photos.map { BookPages.printedNumber($0.lines, cropped: $0.cropped) }
+        for (i, u) in sorted.enumerated() {
+            if read[i].isEmpty { unreadable.append(u) }
+            photos += read[i]
+        }
+        var numbers = photos.map { BookPages.printedNumber($0.lines, cropped: $0.cropped, handwritten: style.handwrittenPageNumbers) }
+        var unread = 0
+        if let key = ClaudeReader.key {
+            let wanted = photos.indices.filter { photos[$0].lines.count >= 8 }
+            var finished = 0
+            var missed: [Int] = []
+            for batch in stride(from: 0, to: wanted.count, by: 8) {     // eight pages at a time
+                showFlash("Claude is reading page \(min(finished + 1, wanted.count)) of \(wanted.count)…", seconds: 180)
+                let some = wanted[batch..<min(batch + 8, wanted.count)]
+                let answers = await withTaskGroup(of: (Int, ClaudePage?).self) { group -> [(Int, ClaudePage?)] in
+                    for i in some { let p = photos[i]; group.addTask { (i, await ClaudeReader.read(p, key: key, style: style)) } }
+                    var all: [(Int, ClaudePage?)] = []
+                    for await a in group { all.append(a) }
+                    return all
+                }
+                for (i, answer) in answers {
+                    finished += 1
+                    guard let page = answer else { missed.append(i); continue }
+                    photos[i].passages = ClaudeReading.apply(page, to: photos[i].passages, lines: photos[i].lines)
+                    if let n = page.number { numbers[i] = n }
+                }
+            }
+            // anything that failed in the rush gets a turn of its own
+            for i in missed.sorted() {
+                showFlash("Claude is rereading a page…", seconds: 180)
+                guard let page = await ClaudeReader.read(photos[i], key: key, style: style) else { unread += 1; continue }
+                photos[i].passages = ClaudeReading.apply(page, to: photos[i].passages, lines: photos[i].lines)
+                if let n = page.number { numbers[i] = n }
+            }
+        }
         // an ISBN on a numbered page is another book being mentioned, not this one's
         for i in photos.indices where numbers[i] != nil { photos[i].isbns = [] }
         let shots = photos.indices.map { (isbns: photos[$0].isbns, numbered: numbers[$0] != nil) }
@@ -5494,6 +6571,7 @@ extension Library {
             for p in pages where outcome[p.source]?.filed != true { outcome[p.source] = (done.folder, done.filed) }
         }
         if !unreadable.isEmpty { messages.append("\(unreadable.count) file\(unreadable.count == 1 ? "" : "s") couldn't be read as a photo.") }
+        if unread > 0 { messages.append("Claude couldn't read \(unread) page\(unread == 1 ? "" : "s"), so they use the Mac's reading: \(ClaudeReader.problem).") }
         // empty the inbox into a folder named for the book; a photo that can't be moved stays queued, so it
         // isn't read again and again
         let f = DateFormatter()

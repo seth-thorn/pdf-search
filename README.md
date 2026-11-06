@@ -40,7 +40,7 @@ A small, native Mac app for reading and citing research PDFs: full-text search a
 <img src="dist/icon.png" width="96" align="right" alt="">
 
 - **Add papers and books in one step.** Drop a PDF on the window: PDF Search finds its DOI (or arXiv ID, ISBN, or title), fetches the citation details from doi.org / Crossref / Open Library, shows them on a card to check, then files the PDF as `~/Papers/Library/<key>.pdf` and adds it to `library.bib`. Drop a folder or more than three PDFs and the details are found in the background, with no cards; a result is kept only if its title appears in the PDF. Books without a PDF: type the ISBN.
-- **Book pages from photos.** Put photos of pages in `Papers/Book Photos`. PDF Search crops them, reads them with Apple's text recognition on your Mac, finds the book by the ISBN on its copyright page (or the title at the top of its pages), and builds one searchable PDF per book, in page order, cited by the printed page numbers. A yellow streak in the margin beside underlined lines becomes a highlight. Add one book at a time, or start each book's photos with its copyright page.
+- **Book pages from photos.** Put photos of pages in `Papers/Book Photos`. PDF Search crops them, reads them with Apple's text recognition on your Mac, finds the book by the ISBN on its copyright page (or the title at the top of its pages), and builds one searchable PDF per book, in page order, cited by the printed page numbers. A yellow streak in the margin beside underlined lines becomes a highlight, and words you've put in big pen parentheses become #tags. Add one book at a time, or start each book's photos with its copyright page.
 - **Search everything.** Every word of every PDF in your `~/Papers` folder, as you type, with snippets and page counts. Separate words must all be in the PDF, anywhere in it (`accessible design`); put an exact phrase in quotes (`"accessible design"`). Capitals and accents are ignored. Search one folder or all of them.
 - **See them.** Each result shows a thumbnail of the PDF's first page; books show their real cover, from Open Library or Google Books.
 - **Read.** Click a result and the PDF opens at the first match, with every match marked. ⌘G steps through them, and ⌘F finds within the open PDF.
@@ -92,6 +92,10 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 **Citation keys** are last name + year + the first meaningful word of the title, all lowercase: `cascone2000aesthetics`, `collins2006handmade`. If two items would get the same key, the second gets a letter (`…b`).
 
 **Adding papers:** drag a PDF onto the window (or **+ → Add Paper**, ⌘O), check the card, press **Add to Library**. Drag a whole folder and its PDFs stay where they are while their details are found in the background. **+ → Add Book or Chapter** (⇧⌘O) looks up an ISBN. Right-click a PDF without details → **Look Up Citation Details…**. To make a folder searchable without adding it to your bibliography: **+ → Add Folder to Search…**.
+
+**More accurate reading (optional):** add an Anthropic API key in Settings, and Claude reads each photographed page for exact quotes, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. With no key, everything stays on your Mac.
+
+**Pages are cleaned up for you:** turned the right way up, straightened from their own lines of print, and whitened, all on your Mac. Which marks get read is your choice in Settings (kept in `Book Photos/Marking Style.json`); with nothing chosen, photos become plain searchable pages.
 
 **Adding book pages:** copy photos into `Papers/Book Photos` (**File ▸ Open Book Photos Folder**). PDF Search takes them within about 10 seconds while it's open, or when it next opens. Filed photos move to `Book Photos/Done/<key>`; any it couldn't file move to `Book Photos/Not Filed`. Originals are never deleted. A new book needs a photo of its copyright page.
 

@@ -83,7 +83,12 @@ Photograph the pages you've marked, and they become part of your library. Nothin
 - One searchable PDF for each book, with the pages in order, and new photos join it. The book shows its real cover in your results.
 - Citations use the page numbers printed in the book. If a number can't be read, it's cited as `p. ?`. Fix it with **File ▸ Set Printed Page Number…**
 - **A yellow streak in the margin** beside underlined lines becomes a highlight. Underlines with no yellow are left alone.
+- **Big pen parentheses** around a word or phrase turn it into a #tag, like `#control-of-affects`. If it isn't inside a highlight, it gets a small highlight of its own. Tags are read from the page, so one can be wrong; edit the note to fix it.
 - The text beside each highlight was read from the photo, so a word can be wrong. Select it to copy it, or click **Edit** on the card to correct it. Search and your paper notes use your correction.
+
+**Want exact quotes?** Add an Anthropic API key in **Settings**, and Claude reads each page for exact text, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. Without a key, everything stays on your Mac.
+
+**Pages are cleaned up for you.** Each page is turned the right way up, its bent lines straightened and its paper whitened. Nothing is redrawn, so your pen marks stay. To have your marks read, say how you mark books in **Settings**. With nothing chosen, photos become plain searchable pages.
 
 **Where your photos go:** filed ones move to `Book Photos/Done`, and any it couldn't file move to `Book Photos/Not Filed`. Your originals are never deleted. To file those, add a photo of the copyright page and move them all back into `Book Photos`.
 
