@@ -88,7 +88,7 @@ Photograph the pages you've marked, and they become part of your library. Nothin
 
 **Want exact quotes?** Add an Anthropic API key in **Settings**, and Claude reads each page for exact text, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. Without a key, everything stays on your Mac.
 
-**Pages are cleaned up for you.** Each page is turned the right way up, its bent lines straightened and its paper whitened. Nothing is redrawn, so your pen marks stay. To have your marks read, say how you mark books in **Settings**. With nothing chosen, photos become plain searchable pages.
+**Pages are cleaned up for you.** Each page is turned the right way up, its bent lines straightened and its paper whitened. Nothing is redrawn, so your pen marks stay, and you can turn straightening off in **Settings**. To have your marks read, say how you mark books in **Settings**. With nothing chosen, photos become plain searchable pages.
 
 **Where your photos go:** filed ones move to `Book Photos/Done`, and any it couldn't file move to `Book Photos/Not Filed`. Your originals are never deleted. To file those, add a photo of the copyright page and move them all back into `Book Photos`.
 

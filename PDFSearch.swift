@@ -95,6 +95,7 @@ struct SettingsView: View {
     @State private var bib = Paths.libraryBib
     @State private var notes = Paths.notesFolder
     @AppStorage("writeNotes") private var writeNotes = true
+    @AppStorage("straightenPages") private var straightenPages = true
     @State private var claudeKey = ClaudeReader.key ?? ""
     @State private var style = MarkingStyle.load(from: Library.photoInbox)
 
@@ -155,11 +156,19 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Claude API key").frame(width: 110, alignment: .leading)
-                    SecureField("Optional", text: $claudeKey)
+                    SecureField("Paste your key here (optional)", text: $claudeKey)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: claudeKey) { k in ClaudeReader.setKey(k) }
                 }
-                Text("For book photos. With a key, Claude reads each page for exact quotes, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. Leave it empty and everything stays on this Mac.")
+                Text("Optional. Paste a Claude API key here for higher-quality reading of book photos: exact quotes, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. Without a key, everything still works using your Mac's own text recognition, and nothing leaves this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Straighten pages in book photos", isOn: $straightenPages)
+                    .toggleStyle(.checkbox)
+                Text("Evens out bends and curved lines of print in new photos. Nothing is redrawn, so your marks stay. Books already made don't change.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -172,10 +181,16 @@ struct SettingsView: View {
                     Toggle("Pen underlines beside the streak pick out the exact words", isOn: $style.underlines)
                         .disabled(!style.marginStreaks)
                     Toggle("Big pen parentheses around a term make it a #tag", isOn: $style.parenthesisTags)
-                    Toggle("A page number written by hand, like P95, counts", isOn: $style.handwrittenPageNumbers)
+                    Toggle("I write in page numbers by hand", isOn: $style.handwrittenPageNumbers)
                 }
                 .toggleStyle(.checkbox)
-                Text("Anything else Claude should know (optional)").padding(.top, 4)
+                Text("Some pages have no printed number, such as the first page of a chapter, so citations need one from you. Write it at the top or bottom of the page (for example, p. 95 or pg. 95).")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Any other habits (optional)").padding(.top, 4)
+                Text("Only for what the boxes above don't cover, in your own words (for example, \u{201C}I circle names\u{201D} or \u{201C}a wavy line means I disagree\u{201D}). Claude reads this when it reads your pages.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 TextField("", text: $style.noteForClaude, axis: .vertical)
                     .labelsHidden()
                     .textFieldStyle(.roundedBorder)
@@ -4743,10 +4758,10 @@ enum BookPages {
         for l in top + bottom {
             let t = clean(l.text)
             if folio(t) { return t }
-            // a number written in by hand, like "P95" or "p. 95"
+            // a number written in by hand, like "P95", "p. 95" or "pg. 95"
             let s = t.lowercased()
             if handwritten, s.hasPrefix("p") {
-                let n = String(s.drop(while: { $0 == "p" || $0 == "." || $0 == " " }))
+                let n = String(s.drop(while: { $0 == "p" || $0 == "g" || $0 == "." || $0 == " " }))
                 if arabic(n) != nil, folio(n) { return n }
             }
         }
@@ -5399,7 +5414,7 @@ struct ClaudePage {
 /// The request and reply for Claude reading a page, kept apart from the network so --selftest can check them.
 enum ClaudeReading {
     static func prompt(style: MarkingStyle = .mine) -> String {
-        let number = style.handwrittenPageNumbers ? "printed or written in by hand (for example P95 means 95)" : "as printed"
+        let number = style.handwrittenPageNumbers ? "printed or written in by hand (for example, P95, p. 95 and pg. 95 all mean 95)" : "as printed"
         let terms = style.parenthesisTags
             ? "one object for each word or phrase the reader enclosed in big hand-drawn parentheses or a hand-drawn circle: {\"term\": ..., \"before\": ...}. term: all the printed words inside the marks, exactly as printed, from just after the opening mark to just before the closing mark, even across lines. before: the three printed words just before the term. Ignore printed parentheses. An empty list if there are none."
             : "an empty list."
@@ -6092,7 +6107,8 @@ enum BookPhotos {
         guard let master = jpeg(image, quality: 0.95), let px = pixels(master) else { return nil }
         var rgba = px.rgba, read = lines
         let w = px.w, h = px.h
-        if let model = PageFlattener.fit(lines, width: w, height: h) {
+        let wanted = UserDefaults.standard.object(forKey: "straightenPages") as? Bool ?? true
+        if wanted, let model = PageFlattener.fit(lines, width: w, height: h) {
             let flat = PageFlattener.flatten(rgba: rgba, width: w, height: h, model)
             if let shown = picture(flat, w, h) {
                 let again = recognise(CIImage(cgImage: shown))
