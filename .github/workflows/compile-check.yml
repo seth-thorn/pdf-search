@@ -9,6 +9,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
       - name: Build and self-test
         run: |
           set +e
@@ -21,6 +23,17 @@ jobs:
             echo "--- selftest" >> ci-result.txt
             cat selftest.log >> ci-result.txt
           fi
+      - name: Baseline self-test (main before these changes)
+        run: |
+          set +e
+          git show aaa18d6:PDFSearch.swift > /tmp/Base.swift
+          swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos13.0 /tmp/Base.swift -o /tmp/Base -lsqlite3 > /tmp/base-build.log 2>&1
+          echo "BASE BUILD EXIT $?" >> ci-result.txt
+          grep -c "warning:" /tmp/base-build.log >> ci-result.txt
+          grep -c "warning:" build.log >> ci-result.txt
+          /tmp/Base --selftest 2>&1 | head -400 > base.log
+          echo "--- selftest diff (base vs new)" >> ci-result.txt
+          diff base.log selftest.log | grep -v "recent labels" >> ci-result.txt
       - name: Save result
         run: |
           git config user.name "ci"

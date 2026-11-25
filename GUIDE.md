@@ -81,7 +81,8 @@ Photograph the pages you've marked, and they become part of your library. Nothin
 
 **What you get:**
 - One searchable PDF for each book, with the pages in order, and new photos join it. The book shows its real cover in your results.
-- Citations use the page numbers printed in the book. If a number can't be read, it's cited as `p. ?`. Fix it with **File ▸ Set Printed Page Number…**
+- Citations use the page numbers printed in the book. If a number can't be read, PDF Search shows you the page when the import ends and asks for it. Skip it and it's cited as `p. ?` until you number it with **File ▸ Number Pages Without Numbers…** (or **File ▸ Set Printed Page Number…** for the page on screen).
+- With an API key in **Settings**, the cover goes first wherever it came in your photos, cut out and kept in its own colours, a back cover goes last, and every page is checked so that none ends up upside down or on its side.
 - **A yellow streak in the margin** beside underlined lines becomes a highlight. Underlines with no yellow are left alone.
 - **Big pen parentheses** around a word or phrase turn it into a #tag, like `#control-of-affects`. If it isn't inside a highlight, it gets a small highlight of its own. Tags are read from the page, so one can be wrong; edit the note to fix it.
 - The text beside each highlight was read from the photo, so a word can be wrong. Select it to copy it, or click **Edit** on the card to correct it. Search and your paper notes use your correction.

@@ -95,6 +95,8 @@ PDF Search indexes `~/Papers` automatically. Each folder inside it can be search
 
 **More accurate reading (optional):** add an Anthropic API key in Settings, and Claude reads each photographed page for exact quotes, handwriting, parentheses and page numbers. Your photos are sent to Anthropic, and use is billed to that key. With no key, everything stays on your Mac.
 
+**Covers and page numbers (2.11):** with an API key, Claude looks at every photo, covers included: it says which way up each one is (a page it says is turned is turned and read again), and which is the front cover, the back cover and the copyright page. The front cover goes first wherever it came in the batch, cut out of the photo and kept in its own colours; the back cover goes last. When an import ends, any page whose number couldn't be read is shown to you with a box for its number; skip it and it waits for **File ▸ Number Pages Without Numbers…**
+
 **Pages are cleaned up for you:** turned the right way up, straightened from their own lines of print, and whitened, all on your Mac. Straightening can be turned off in Settings. Which marks get read is your choice in Settings (kept in `Book Photos/Marking Style.json`); with nothing chosen, photos become plain searchable pages.
 
 **Adding book pages:** copy photos into `Papers/Book Photos` (**File ▸ Open Book Photos Folder**). PDF Search takes them within about 10 seconds while it's open, or when it next opens. Filed photos move to `Book Photos/Done/<key>`; any it couldn't file move to `Book Photos/Not Filed`. Originals are never deleted. A new book needs a photo of its copyright page.

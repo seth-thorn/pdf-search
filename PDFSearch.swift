@@ -6863,7 +6863,7 @@ extension Library {
         var questions: [PageQuestion] = []
         for a in asks {
             let url = URL(fileURLWithPath: a.path), pages = a.pages
-            let pictures = await Task.detached(priority: .userInitiated, operation: { BookPhotos.pictures(of: pages, in: url) }).value
+            let pictures = BookPhotos.pictures(of: pages, in: url)      // a few small pictures: quick enough here
             let book = (a.path as NSString).lastPathComponent.replacingOccurrences(of: ".pdf", with: "")
             for i in pages {
                 guard let shown = pictures[i] else { continue }
