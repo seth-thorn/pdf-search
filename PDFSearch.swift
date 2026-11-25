@@ -45,6 +45,7 @@ struct PDFSearchApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .option])
                 Button("Write Notes for All Annotated PDFs") { lib.exportAllMarginalia() }
                 Button("Set Printed Page Number…") { Viewer.current?.askPageNumber() }
+                Button("Number Pages Without Numbers…") { lib.askUnnumbered() }
                 Button("Open Book Photos Folder") { lib.openPhotoInbox() }
                 Button("Clear Index…") { lib.confirmClear() }
             }
@@ -357,6 +358,12 @@ struct ContentView: View {
         .onChange(of: lib.openNoteRequest) { _ in openPaperNote() }
         .onChange(of: lib.readmeRequest) { _ in showReadme = true }
         .sheet(isPresented: $showReadme) { ReadmeCard() }
+        .sheet(item: $lib.pageQuestions) { batch in
+            PageNumberSheet(batch: batch) { answers in
+                lib.pageQuestions = nil
+                lib.numberPages(answers)
+            }
+        }
         .task(id: findText) {
             guard showFind else { return }
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -894,6 +901,59 @@ struct ReadmeCard: View {
 }
 
 /// A #tag under a note: click to see every note with that tag (in My Notes). The same tag works in Obsidian.
+/// Asks for the number printed on each page that couldn't be read, showing the page. Skipped pages keep "?".
+struct PageNumberSheet: View {
+    let batch: PageQuestions
+    let done: ([(question: PageQuestion, label: String)]) -> Void
+    @State private var at = 0
+    @State private var typed = ""
+    @State private var answers: [(question: PageQuestion, label: String)] = []
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let q = batch.questions[min(at, batch.questions.count - 1)]
+        VStack(alignment: .leading, spacing: 12) {
+            Text("What page number is printed on this page?").font(.headline)
+            Text("@\(q.book) · page \(at + 1) of \(batch.questions.count) without a number")
+                .font(.caption).foregroundStyle(.secondary)
+            Group {
+                if let img = q.picture {
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+                } else {
+                    Text("No picture of this page").foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 380, height: 500)
+            .background(Color.secondary.opacity(0.08))
+            HStack {
+                TextField("42, or xiv", text: $typed)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+                    .focused($focused)
+                    .onSubmit { answer() }
+                Spacer()
+                Button("Ask Me Later") { done(answers) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Skip") { typed = ""; answer() }
+                Button("Set") { answer() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(typed.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            Text("A page you skip is cited as p. ? until you number it: File ▸ Number Pages Without Numbers…")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .onAppear { focused = true }
+    }
+
+    private func answer() {
+        let label = typed.trimmingCharacters(in: .whitespaces).lowercased()
+        if !label.isEmpty { answers.append((question: batch.questions[at], label: label)) }
+        typed = ""
+        if at + 1 < batch.questions.count { at += 1; focused = true } else { done(answers) }
+    }
+}
+
 struct TagChip: View {
     let tag: String
     var body: some View {
@@ -1920,6 +1980,20 @@ struct AddRequest: Identifiable {
     let file: URL?
 }
 
+/// A photographed page with no page number that you're asked about at the end of an import.
+struct PageQuestion: Identifiable {
+    let id = UUID()
+    let path: String        // the book's PDF
+    let book: String        // its cite key, for the heading
+    let index: Int          // where the page was in the PDF when you were asked
+    let text: String        // its words, to find it again if other pages have gone in since
+    let picture: NSImage?
+}
+struct PageQuestions: Identifiable {
+    let id = UUID()
+    let questions: [PageQuestion]
+}
+
 struct LinkRequest: Equatable {
     let path: String
     let page: Int
@@ -2078,6 +2152,8 @@ final class Library: ObservableObject {
     @Published private(set) var bib = BibIndex()
     /// the "Add to Library" card being shown (nil file = a book or chapter without a PDF)
     @Published var addRequest: AddRequest?
+    /// pages with no number, to ask about once a batch of photos is in
+    @Published var pageQuestions: PageQuestions?
     private var addQueue: [URL?] = []
     /// the batch of book photos being worked through (a new batch waits for it)
     private var photoTask: Task<Void, Never>?
@@ -3551,6 +3627,15 @@ enum SelfTest {
         let r = BookPages.self
         func line(_ t: String, _ y: CGFloat) -> OCRLine { OCRLine(text: t, box: CGRect(x: 0.1, y: y, width: 0.8, height: 0.02), words: []) }
         print("SELFTEST page numbers: \(r.printedNumber([line("143", 0.05)], cropped: true) ?? "-") \(r.printedNumber([line("42 THE BOOK TITLE", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("CONTRIBUTORS vii", 0.95)], cropped: true) ?? "-") \(r.printedNumber([line("12 Ibid., 46.", 0.05)], cropped: true) ?? "none") \(r.fillGaps(["142", nil, "144"]).map { $0 ?? "?" }) (expect 143 42 vii none [142, 143, 144])")
+        // what Claude says a photo is, and where that puts it: a cover anywhere goes first, a back cover last
+        let told = [ClaudeReading.parse(#"{"turn": 180, "kind": "cover", "page": "3", "terms": [], "passages": []}"#),
+                    ClaudeReading.parse(#"Here: {"turn": -90, "kind": "Page", "page": 12}"#),
+                    ClaudeReading.parse(#"{"turn": "270", "kind": "spine", "page": null}"#)]
+        print("SELFTEST claude page: \(told.map { p in p.map { "\($0.turn) \($0.kind ?? "-") \($0.number ?? "-")" } ?? "nil" }) (expect [180 cover -, 270 page 12, 270 - -])")
+        let kinded = r.labels(numbers: ["12", "13", nil, nil, "14"], isbnPage: [false, false, false, false, false], characters: [900, 900, 50, 80, 900],
+                              hasCover: false, kinds: ["page", "page", "cover", "back", "page"])
+        let plain = r.labels(numbers: [nil, "12", nil, "14"], isbnPage: [false, false, true, false], characters: [50, 900, 300, 900], hasCover: false)
+        print("SELFTEST page kinds: \(kinded) \(plain) ranks=\(["cover", "back", "14"].map { r.rank($0) ?? -99 }) (expect [12, 13, cover, back, 14] [cover, 12, 13, 14] ranks=[-3.0, 1000000.0, 14.0])")
         print("SELFTEST photo isbn: \(r.isbns(in: "ISBN 978-0-415-99873-4 (pbk)")) bad=\(r.isbns(in: "ISBN 978-0-415-99873-5")) ten=\(r.isbn13("0-415-99873-5") ?? "-") (expect [9780415998734] [] 9780415998734)")
         print("SELFTEST search words: \(Library.parse("Peters Taylor").parts) | \(Library.parse("\"exact phrase\" other").parts) | \(Library.parse("one, two").parts) (expect each word apart, the quoted phrase whole)")
         print("SELFTEST key terms: \(BookMarks.tag(["a", "process", "of", "adoption)"])?.tag ?? "-") \(BookMarks.tag(["of", "the"])?.tag ?? "none") (expect process-of-adoption none)")
@@ -4706,6 +4791,7 @@ enum BookPages {
     static let noNumber = "?"
     static let cover = "cover"
     static let front = "front"
+    static let back = "back"        // the back cover, which goes last
 
     /// "xiv" → 14. Lower case only, or ordinary capitalised words would count.
     static func roman(_ s: String) -> Int? {
@@ -4732,6 +4818,7 @@ enum BookPages {
     static func rank(_ label: String) -> Double? {
         if label == cover { return -3 }
         if label == front { return -2 }
+        if label == back { return 1_000_000 }
         if let n = arabic(label) { return Double(n) }
         if let n = roman(label) { return -1 + Double(n) / 10_000 }
         return nil
@@ -4930,14 +5017,21 @@ enum BookPages {
         return out
     }
 
-    /// Labels for one book's photos, in order. The first photo counts as the cover if it has little text, no
-    /// number and no ISBN, and the book has no cover yet. An ISBN page is front matter.
-    static func labels(numbers: [String?], isbnPage: [Bool], characters: [Int], hasCover: Bool) -> [String] {
-        let filled = fillGaps(numbers)
+    /// Labels for one book's photos, in order. `kinds` is what Claude said each photo shows (cover, back,
+    /// copyright, page), when it read them: a front cover is the cover wherever it came in the batch, and a back
+    /// cover goes last. Without Claude, the first photo counts as the cover if it has little text, no number and
+    /// no ISBN, and the book has no cover yet. An ISBN page is front matter.
+    static func labels(numbers: [String?], isbnPage: [Bool], characters: [Int], hasCover: Bool, kinds: [String?] = []) -> [String] {
+        func kind(_ i: Int) -> String? { i < kinds.count ? kinds[i] : nil }
+        let firstCover = numbers.indices.first { kind($0) == cover }
+        // a cover has no page number, whatever was read on it
+        let filled = fillGaps(numbers.indices.map { kind($0) == cover || kind($0) == back ? nil : numbers[$0] })
         return filled.indices.map { i in
+            if kind(i) == cover { return i == firstCover ? cover : front }
+            if kind(i) == back { return back }
             if let n = filled[i] { return n }
-            if isbnPage[i] { return front }
-            if i == 0 && !hasCover && characters[i] < 400 { return cover }
+            if isbnPage[i] || kind(i) == "copyright" { return front }
+            if firstCover == nil && i == 0 && !hasCover && characters[i] < 400 && kind(i) == nil { return cover }
             return noNumber
         }
     }
@@ -5406,6 +5500,8 @@ enum BookMarks {
 /// What Claude read from a page photo, if you've added an API key in Settings.
 struct ClaudePage {
     var number: String?
+    var turn = 0                    // degrees clockwise the photo must turn to read the right way up
+    var kind: String?               // "cover", "back", "copyright" or "page"
     var passages: [(text: String, note: String)]
     var terms: [String]
     var before: [String] = []       // for each term, the printed words just before it
@@ -5431,10 +5527,12 @@ enum ClaudeReading {
             """
         }
         var s = """
-        This is a photo of a page from a printed book that a reader may have marked. Look closely: the pen lines are thin. Reply with JSON only, no other text:
-        {"page": ..., "terms": [...], "passages": [...]}
+        This is a photo of a page from a printed book that a reader may have marked, or of the book's cover. Look closely: the pen lines are thin. Reply with JSON only, no other text:
+        {"turn": ..., "kind": ..., "page": ..., "terms": [...], "passages": [...]}
 
-        page: the page number, \(number), as a string of digits or lower-case roman numerals. null if there is none.
+        turn: how many degrees the photo must be turned clockwise so that its print reads the right way up: 0, 90, 180 or 270. Judge by the printed letters, not by how the photo is framed; an upside-down page is 180. Answer everything else as if the photo had been turned.
+        kind: "cover" for the front cover or dust jacket of the book, "back" for the back cover, "copyright" for the page with the publisher's details and ISBN, or "page" for any other page.
+        page: the page number, \(number), as a string of digits or lower-case roman numerals. null if there is none, and always null for a cover.
         terms: \(terms)
         passages: \(passages)
         """
@@ -5450,14 +5548,23 @@ enum ClaudeReading {
               let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         var number = (j["page"] as? String)?.trimmingCharacters(in: .whitespaces).lowercased()
         if let n = j["page"] as? Int { number = String(n) }
-        if let n = number, BookPages.rank(n) == nil || n == BookPages.cover || n == BookPages.front { number = nil }
+        if let n = number, BookPages.rank(n) == nil || [BookPages.cover, BookPages.front, BookPages.back].contains(n) { number = nil }
+        // the turn as a quarter of a circle, however it's written: 180, "180", -90, 270.0
+        var degrees = 0.0
+        if let n = j["turn"] as? NSNumber { degrees = n.doubleValue }
+        else if let t = j["turn"] as? String, let n = Double(t.trimmingCharacters(in: .whitespaces)) { degrees = n }
+        let quarters = Int((degrees / 90).rounded()) % 4
+        let turn = ((quarters + 4) % 4) * 90
+        var kind = (j["kind"] as? String)?.trimmingCharacters(in: .whitespaces).lowercased()
+        if let k = kind, ![BookPages.cover, BookPages.back, "copyright", "page"].contains(k) { kind = nil }
         let raw = (j["terms"] as? [Any]) ?? []
         let terms = raw.map { ($0 as? String) ?? (($0 as? [String: Any])?["term"] as? String) ?? "" }
         let before = raw.map { (($0 as? [String: Any])?["before"] as? String) ?? "" }
         let passages = ((j["passages"] as? [[String: Any]]) ?? []).map {
             (text: ($0["text"] as? String) ?? "", note: ($0["note"] as? String) ?? "")
         }
-        return ClaudePage(number: number, passages: passages, terms: terms, before: before)
+        return ClaudePage(number: kind == BookPages.cover || kind == BookPages.back ? nil : number, turn: turn, kind: kind,
+                          passages: passages, terms: terms, before: before)
     }
 
     /// The page's words in reading order, broken at punctuation, so "politics—which" matches however it was read.
@@ -5995,6 +6102,10 @@ struct PagePhoto {
     var isbns: [String]
     var passages: [MarkedPassage] = []
     var text: String { lines.map { $0.text }.joined(separator: "\n") }
+    /// The page as photographed, without whitened paper: how a cover goes into the PDF.
+    var unwhitened: PagePhoto {
+        PagePhoto(source: source, jpeg: original, original: original, lines: lines, cropped: cropped, isbns: isbns, passages: passages)
+    }
 }
 
 /// The optional Claude step. With an API key in Settings, each page photo is read by Claude for exact quotes,
@@ -6079,14 +6190,7 @@ enum BookPhotos {
         let (page, lines) = upright(crop ?? image)
         let printed = barcodes(image)
         func photo(_ i: CIImage, _ l: [OCRLine]) -> PagePhoto? {
-            // your marks are read from the straightened photo; the PDF gets the same page with whitened paper
-            guard let page = straightened(i, l), let flat = picture(page.rgba, page.w, page.h),
-                  let white = picture(PageFlattener.whiten(rgba: page.rgba, width: page.w, height: page.h), page.w, page.h),
-                  let original = jpeg(CIImage(cgImage: flat)), let j = jpeg(CIImage(cgImage: white)) else { return nil }
-            var found = printed
-            for n in BookPages.isbns(in: page.lines.map { $0.text }.joined(separator: "\n")) where !found.contains(n) { found.append(n) }
-            return PagePhoto(source: url, jpeg: j, original: original, lines: page.lines, cropped: crop != nil, isbns: found,
-                             passages: marked(original, clean: j, page.lines, style))
+            made(i, l, source: url, cropped: crop != nil, printed: printed, style: style)
         }
         // wider than tall: an open book, if both halves are full of text
         if page.extent.width > page.extent.height * 1.1 {
@@ -6099,6 +6203,61 @@ enum BookPhotos {
             }
         }
         return photo(page, lines).map { [$0] } ?? []
+    }
+
+    /// One page from an upright picture of it and its reading. Your marks are read from the straightened photo;
+    /// the PDF gets the same page with whitened paper.
+    private static func made(_ i: CIImage, _ l: [OCRLine], source url: URL, cropped: Bool, printed: [String], style: MarkingStyle) -> PagePhoto? {
+        guard let page = straightened(i, l), let flat = picture(page.rgba, page.w, page.h),
+              let white = picture(PageFlattener.whiten(rgba: page.rgba, width: page.w, height: page.h), page.w, page.h),
+              let original = jpeg(CIImage(cgImage: flat)), let j = jpeg(CIImage(cgImage: white)) else { return nil }
+        var found = printed
+        for n in BookPages.isbns(in: page.lines.map { $0.text }.joined(separator: "\n")) where !found.contains(n) { found.append(n) }
+        return PagePhoto(source: url, jpeg: j, original: original, lines: page.lines, cropped: cropped, isbns: found,
+                         passages: marked(original, clean: j, page.lines, style))
+    }
+
+    /// Makes a page again after Claude has looked at it: turned the right way up (`turn` degrees clockwise), and,
+    /// for a cover, cut out of the photo and left in its own colours (whitening is for paper). Starts from the
+    /// page before whitening. nil if it can't be made, when the page stays as it was.
+    static func redo(_ p: PagePhoto, turn: Int, cover: Bool, style: MarkingStyle) -> PagePhoto? {
+        guard let raw = CIImage(data: p.original) else { return nil }
+        var image = zeroed(raw)
+        let way: [Int: CGImagePropertyOrientation] = [90: .right, 180: .down, 270: .left]
+        if let o = way[turn] { image = zeroed(image.oriented(o)) }
+        guard cover else {
+            return made(image, recognise(image), source: p.source, cropped: p.cropped, printed: p.isbns, style: style)
+        }
+        var cut = image, cropped = p.cropped
+        if !cropped, let c = pageCrop(image) ?? coverCrop(image) { cut = c; cropped = true }
+        // the camera's colours, gently corrected: exposure and colour balance, never red-eye or faces
+        for f in cut.autoAdjustmentFilters(options: [.redEye: false]) {
+            f.setValue(cut, forKey: kCIInputImageKey)
+            if let out = f.outputImage { cut = zeroed(out) }
+        }
+        guard let j = jpeg(cut, quality: 0.85) else { return nil }
+        return PagePhoto(source: p.source, jpeg: j, original: j, lines: recognise(cut), cropped: cropped, isbns: p.isbns)
+    }
+
+    /// A cover is a firm rectangle, so when the page finder misses it, the largest rectangle in the photo is tried.
+    private static func coverCrop(_ image: CIImage) -> CIImage? {
+        let request = VNDetectRectanglesRequest()
+        request.minimumAspectRatio = 0.4
+        request.maximumAspectRatio = 1
+        request.minimumSize = 0.4
+        request.maximumObservations = 1
+        request.minimumConfidence = 0.6
+        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+        try? handler.perform([request])
+        guard let r = request.results?.first else { return nil }
+        let share = BookPages.area([r.topLeft, r.topRight, r.bottomRight, r.bottomLeft])
+        guard share > 0.25, share < 0.995 else { return nil }
+        let size = image.extent.size
+        func v(_ p: CGPoint) -> CIVector { CIVector(x: p.x * size.width, y: p.y * size.height) }
+        let out = image.applyingFilter("CIPerspectiveCorrection", parameters: [
+            "inputTopLeft": v(r.topLeft), "inputTopRight": v(r.topRight),
+            "inputBottomRight": v(r.bottomRight), "inputBottomLeft": v(r.bottomLeft)])
+        return out.extent.isInfinite || out.extent.isEmpty ? nil : zeroed(out)
     }
 
     /// Straightens a page by its lines of print and trims off any neighbouring page, then reads it again, so the words
@@ -6312,8 +6471,9 @@ enum BookPhotos {
 
     /// Adds pages to a book's PDF (making it if needed), each where its page number says it goes. A page already
     /// there is replaced by a new photo of it, unless it has highlights, when the new one goes next to it.
-    /// Returns where the first new page is and how many went in, or nil if the PDF couldn't be written.
-    static func add(_ pages: [(photo: PagePhoto, label: String)], to url: URL) -> (first: Int, placed: Int)? {
+    /// Returns where the first new page is, how many went in and where the new pages with no number ended up,
+    /// or nil if the PDF couldn't be written.
+    static func add(_ pages: [(photo: PagePhoto, label: String)], to url: URL) -> (first: Int, placed: Int, unnumbered: [Int])? {
         let fm = FileManager.default
         let exists = fm.fileExists(atPath: url.path)
         let opened = exists ? PDFDocument(url: url) : PDFDocument()
@@ -6323,7 +6483,9 @@ enum BookPhotos {
         var placed = 0
         var previous: Double?
         var unknowns = 0.0
-        for (photo, label) in pages {
+        var blank: [PDFPage] = []           // new pages with no number, to ask about once the batch is in
+        for (taken, label) in pages {
+            let photo = label == BookPages.cover ? taken.unwhitened : taken
             guard let data = pageData(photo), let single = PDFDocument(data: data), let page = single.page(at: 0) else { continue }
             held.append(single)
             var at: Int?
@@ -6345,6 +6507,7 @@ enum BookPhotos {
             if let placed = doc.page(at: index) {
                 PageLabels.set(label, on: placed, photo: true)
                 highlight(photo.passages, on: placed)
+                if label == BookPages.noNumber { blank.append(placed) }
             }
             if let r = BookPages.rank(label) { previous = r }
             first = min(first ?? index, index)
@@ -6352,6 +6515,7 @@ enum BookPhotos {
         }
         guard let start = first else { return nil }
         keepSummaryOnFirstPage(doc)
+        let unnumbered = blank.map { doc.index(for: $0) }.filter { $0 != NSNotFound && $0 < doc.pageCount }.sorted()
         let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).pdfsearch-saving")
         guard withExtendedLifetime(held, { doc.write(to: tmp) }) else { try? fm.removeItem(at: tmp); return nil }
         do {
@@ -6360,7 +6524,65 @@ enum BookPhotos {
             try? fm.removeItem(at: tmp)
             return nil
         }
-        return (start, placed)
+        return (start, placed, unnumbered)
+    }
+
+    /// Gives photo pages the numbers you typed and moves each to its place in the book. A page is found where it
+    /// was when you were asked, or by its words if pages have gone in since, and only while it still has no number.
+    /// Returns where the first of them is afterwards, or nil if the PDF couldn't be opened or saved.
+    static func number(_ wanted: [(index: Int, text: String, label: String)], in url: URL) -> Int? {
+        guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
+        // the pages themselves, before anything moves
+        var waiting = (0..<doc.pageCount).compactMap { doc.page(at: $0) }.filter {
+            PageLabels.isPhotoPage($0) && PageLabels.marked($0) == BookPages.noNumber
+        }
+        var pages: [(page: PDFPage, label: String)] = []
+        for w in wanted {
+            func fits(_ p: PDFPage) -> Bool { waiting.contains(where: { $0 === p }) && (p.string ?? "") == w.text }
+            var found: PDFPage?
+            if let p = doc.page(at: w.index), fits(p) { found = p }
+            if found == nil { found = waiting.first(where: fits) }
+            guard let page = found else { continue }
+            waiting.removeAll { $0 === page }
+            pages.append((page: page, label: w.label))
+        }
+        guard !pages.isEmpty else { return nil }
+        for p in pages { PageLabels.set(p.label, on: p.page, photo: true) }
+        for p in pages {
+            guard let rank = BookPages.rank(p.label) else { continue }
+            let at = doc.index(for: p.page)
+            guard at != NSNotFound else { continue }
+            doc.removePage(at: at)
+            let ranks = (0..<doc.pageCount).map { i in doc.page(at: i).flatMap(PageLabels.marked).flatMap(BookPages.rank) }
+            doc.insert(p.page, at: BookPages.insertionIndex(rank: rank, among: ranks))
+        }
+        keepSummaryOnFirstPage(doc)
+        let first = pages.map { doc.index(for: $0.page) }.filter { $0 != NSNotFound }.min() ?? 0
+        let fm = FileManager.default
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).pdfsearch-saving")
+        guard doc.write(to: tmp) else { try? fm.removeItem(at: tmp); return nil }
+        do { _ = try fm.replaceItemAt(url, withItemAt: tmp) } catch { try? fm.removeItem(at: tmp); return nil }
+        return first
+    }
+
+    /// Small pictures of a PDF's pages, with their words, for asking about them.
+    static func pictures(of indices: [Int], in url: URL) -> [Int: (picture: NSImage, text: String)] {
+        guard let doc = PDFDocument(url: url) else { return [:] }
+        var out: [Int: (picture: NSImage, text: String)] = [:]
+        for i in indices {
+            guard let p = doc.page(at: i) else { continue }
+            out[i] = (picture: p.thumbnail(of: NSSize(width: 480, height: 640), for: .mediaBox), text: p.string ?? "")
+        }
+        return out
+    }
+
+    /// Photo pages that are still waiting for a number.
+    static func unnumbered(in url: URL) -> [Int] {
+        guard let doc = PDFDocument(url: url) else { return [] }
+        return (0..<doc.pageCount).filter { i in
+            guard let p = doc.page(at: i) else { return false }
+            return PageLabels.isPhotoPage(p) && PageLabels.marked(p) == BookPages.noNumber
+        }
     }
 
     /// "About this paper" is read from page 1, so it has to stay there when a page goes in front of it.
@@ -6546,9 +6768,19 @@ extension Library {
             photos += read[i]
         }
         var numbers = photos.map { BookPages.printedNumber($0.lines, cropped: $0.cropped, handwritten: style.handwrittenPageNumbers) }
+        var kinds = [String?](repeating: nil, count: photos.count)      // cover, back, copyright or page, from Claude
+        var turns = [Int](repeating: 0, count: photos.count)
         var unread = 0
         if let key = ClaudeReader.key {
-            let wanted = photos.indices.filter { photos[$0].lines.count >= 8 }
+            func use(_ i: Int, _ page: ClaudePage) {
+                photos[i].passages = ClaudeReading.apply(page, to: photos[i].passages, lines: photos[i].lines)
+                if let n = page.number { numbers[i] = n }
+                kinds[i] = page.kind
+                turns[i] = page.turn
+                if page.kind == BookPages.cover || page.kind == BookPages.back { numbers[i] = nil }
+            }
+            // every page, covers and nearly empty pages too: Claude says which way up each one is and what it is
+            let wanted = Array(photos.indices)
             var finished = 0
             var missed: [Int] = []
             for batch in stride(from: 0, to: wanted.count, by: 8) {     // eight pages at a time
@@ -6563,27 +6795,44 @@ extension Library {
                 for (i, answer) in answers {
                     finished += 1
                     guard let page = answer else { missed.append(i); continue }
-                    photos[i].passages = ClaudeReading.apply(page, to: photos[i].passages, lines: photos[i].lines)
-                    if let n = page.number { numbers[i] = n }
+                    use(i, page)
                 }
             }
             // anything that failed in the rush gets a turn of its own
             for i in missed.sorted() {
                 showFlash("Claude is rereading a page…", seconds: 180)
                 guard let page = await ClaudeReader.read(photos[i], key: key, style: style) else { unread += 1; continue }
-                photos[i].passages = ClaudeReading.apply(page, to: photos[i].passages, lines: photos[i].lines)
-                if let n = page.number { numbers[i] = n }
+                use(i, page)
+            }
+            // a page the wrong way up is turned and read again, and Claude checks it once more; a cover is cut out
+            // and keeps its colours
+            for i in photos.indices where turns[i] != 0 || kinds[i] == BookPages.cover {
+                showFlash(turns[i] != 0 ? "Turning a page the right way up…" : "Tidying the cover…", seconds: 180)
+                for _ in 0..<3 {
+                    let turn = turns[i], cover = kinds[i] == BookPages.cover, before = photos[i]
+                    guard let again = await Task.detached(priority: .userInitiated, operation: {
+                        BookPhotos.redo(before, turn: turn, cover: cover, style: style)
+                    }).value else { break }
+                    photos[i] = again
+                    turns[i] = 0
+                    guard turn != 0, let page = await ClaudeReader.read(again, key: key, style: style) else { break }
+                    use(i, page)
+                    // done once it reads the right way up and is still what it was taken for
+                    if turns[i] == 0 && (kinds[i] == BookPages.cover) == cover { break }
+                }
             }
         }
         // an ISBN on a numbered page is another book being mentioned, not this one's
         for i in photos.indices where numbers[i] != nil { photos[i].isbns = [] }
         let shots = photos.indices.map { (isbns: photos[$0].isbns, numbered: numbers[$0] != nil) }
         var messages: [String] = []
+        var asks: [(path: String, pages: [Int])] = []                // pages to ask you the numbers of, at the end
         var outcome: [URL: (folder: String, filed: Bool)] = [:]     // where each photo goes next
         for group in BookPages.groups(shots) {
             let pages = group.map { photos[$0] }
-            let done = await fileBook(pages, numbers: group.map { numbers[$0] })
+            let done = await fileBook(pages, numbers: group.map { numbers[$0] }, kinds: group.map { kinds[$0] })
             messages.append(done.message)
+            if let path = done.path, !done.unnumbered.isEmpty { asks.append((path: path, pages: done.unnumbered)) }
             for p in pages where outcome[p.source]?.filed != true { outcome[p.source] = (done.folder, done.filed) }
         }
         if !unreadable.isEmpty { messages.append("\(unreadable.count) file\(unreadable.count == 1 ? "" : "s") couldn't be read as a photo.") }
@@ -6604,6 +6853,62 @@ extension Library {
         }
         if !parked.isEmpty { messages.append("Not filed: see Book Photos/Not Filed/" + parked.sorted().joined(separator: ", ") + ".") }
         showFlash(messages.joined(separator: " "), seconds: 20)
+        await askPageNumbers(asks)
+    }
+
+    /// Shows each page that has no number, one at a time, and asks what number is printed on it. Pages you skip
+    /// keep "?" until File ▸ Number Pages Without Numbers…
+    @MainActor
+    func askPageNumbers(_ asks: [(path: String, pages: [Int])]) async {
+        var questions: [PageQuestion] = []
+        for a in asks {
+            let url = URL(fileURLWithPath: a.path), pages = a.pages
+            let pictures = await Task.detached(priority: .userInitiated, operation: { BookPhotos.pictures(of: pages, in: url) }).value
+            let book = (a.path as NSString).lastPathComponent.replacingOccurrences(of: ".pdf", with: "")
+            for i in pages {
+                guard let shown = pictures[i] else { continue }
+                questions.append(PageQuestion(path: a.path, book: book, index: i, text: shown.text, picture: shown.picture))
+            }
+        }
+        guard !questions.isEmpty else { return }
+        // still asking about an earlier batch: ask about those pages and these together
+        let asking = (pageQuestions?.questions ?? []).filter { q in !questions.contains { $0.path == q.path && $0.text == q.text } }
+        pageQuestions = PageQuestions(questions: asking + questions)
+    }
+
+    /// File ▸ Number Pages Without Numbers…: asks about the open book's photo pages that are still "?".
+    func askUnnumbered() {
+        guard let path = Viewer.current?.path, !path.isEmpty else { showFlash("Open a book made from photos first."); return }
+        Viewer.current?.flushSave()
+        let pages = BookPhotos.unnumbered(in: URL(fileURLWithPath: path))
+        guard !pages.isEmpty else { showFlash("Every photo page in this PDF has a number."); return }
+        Task { @MainActor in await askPageNumbers([(path: path, pages: pages)]) }
+    }
+
+    /// Saves the numbers you gave, moves those pages to their places, and opens the book at the first of them.
+    func numberPages(_ answers: [(question: PageQuestion, label: String)]) {
+        let byBook = Dictionary(grouping: answers, by: { $0.question.path })
+        guard !byBook.isEmpty else { return }
+        let before = photoTask
+        photoTask = Task { @MainActor in
+            await before?.value
+            for (path, list) in byBook {
+                // this PDF may be open: save it and close it, so nothing can write the old copy back over the new one
+                if Viewer.current?.path == path { Viewer.current?.close() } else { Viewer.current?.flushSave() }
+                let url = URL(fileURLWithPath: path)
+                let wanted = list.map { (index: $0.question.index, text: $0.question.text, label: $0.label) }
+                guard let first = await Task.detached(priority: .userInitiated, operation: { BookPhotos.number(wanted, in: url) }).value else {
+                    showFlash("Couldn't save the page numbers to \(url.lastPathComponent).", seconds: 10)
+                    continue
+                }
+                refresh()
+                if let doc = PDFDocument(url: url), !Marginalia.collect(doc).isEmpty {
+                    afterSave(path: path, notes: Marginalia.collect(doc), summary: Marginalia.summary(doc))
+                }
+                openPage(path, first)
+                showFlash("Page number\(list.count == 1 ? "" : "s") saved.", seconds: 4)
+            }
+        }
     }
 
     /// What's known about the book in a batch: an entry already in library.bib, or the details of a new one.
@@ -6642,16 +6947,17 @@ extension Library {
 
     /// Files one book's photos, and says what happened and whether they were filed.
     @MainActor
-    private func fileBook(_ photos: [PagePhoto], numbers: [String?]) async -> (message: String, filed: Bool, folder: String) {
+    private func fileBook(_ photos: [PagePhoto], numbers: [String?], kinds: [String?]) async
+        -> (message: String, filed: Bool, folder: String, path: String?, unnumbered: [Int]) {
         showFlash("Finding the book…", seconds: 120)
         let book = await identify(photos)
         let fm = FileManager.default
         func labelled(cover has: Bool) -> [(photo: PagePhoto, label: String)] {
             let labels = BookPages.labels(numbers: numbers, isbnPage: photos.map { !$0.isbns.isEmpty },
-                                          characters: photos.map { $0.text.count }, hasCover: has)
+                                          characters: photos.map { $0.text.count }, hasCover: has, kinds: kinds)
             return Array(zip(photos, labels)).map { (photo: $0.0, label: $0.1) }
         }
-        func place(_ pages: [(photo: PagePhoto, label: String)], in url: URL) async -> (first: Int, placed: Int)? {
+        func place(_ pages: [(photo: PagePhoto, label: String)], in url: URL) async -> (first: Int, placed: Int, unnumbered: [Int])? {
             await Task.detached(priority: .userInitiated) { BookPhotos.add(pages, to: url) }.value
         }
         // so highlights reach the paper note and My Notes straight away
@@ -6661,7 +6967,7 @@ extension Library {
         }
         func summary(_ pages: [(photo: PagePhoto, label: String)], placed: Int, _ key: String) -> String {
             let blank = pages.filter { $0.label == BookPages.noNumber }.count
-            let note = blank == 0 ? "" : " \(blank) with no readable page number (cited as p. ?; fix with File ▸ Set Printed Page Number…)."
+            let note = blank == 0 ? "" : " \(blank) with no readable page number: you'll be asked for \(blank == 1 ? "it" : "them")."
             let lost = pages.count - placed
             let failed = lost == 0 ? "" : " \(lost) couldn't be added."
             let marked = photos.reduce(0) { $0 + $1.passages.count }
@@ -6671,29 +6977,30 @@ extension Library {
         switch book {
         case .unknown(let why):
             let isbn = photos.lazy.flatMap({ $0.isbns }).first
-            return (why + " Nothing was filed. Add a photo of the book's copyright page and try again.", false, isbn.map { "ISBN " + $0 } ?? "")
+            return (why + " Nothing was filed. Add a photo of the book's copyright page and try again.", false, isbn.map { "ISBN " + $0 } ?? "", nil, [])
         case .known(let e):
             let dest = URL(fileURLWithPath: Paths.libraryFolder + "/" + e.key + ".pdf")
             let own = e.file.map { URL(fileURLWithPath: $0) } ?? dest
             if fm.fileExists(atPath: own.path), !BookPhotos.isPhotoBook(own) {
-                return ("You already have @\(e.key) as a PDF, so these photos were not added to it.", false, e.key)
+                return ("You already have @\(e.key) as a PDF, so these photos were not added to it.", false, e.key, nil, [])
             }
-            do { try fm.createDirectory(at: own.deletingLastPathComponent(), withIntermediateDirectories: true) } catch { return ("Couldn't save the pages: \(error.localizedDescription)", false, e.key) }
+            do { try fm.createDirectory(at: own.deletingLastPathComponent(), withIntermediateDirectories: true) } catch { return ("Couldn't save the pages: \(error.localizedDescription)", false, e.key, nil, []) }
             // this PDF may be open: save it and close it, so nothing can write the old copy back over the new one
             if Viewer.current?.path == own.path { Viewer.current?.close() } else { Viewer.current?.flushSave() }
             let pages = labelled(cover: BookPhotos.hasCover(own))
-            guard let done = await place(pages, in: own) else { return ("Couldn't save the pages to @\(e.key).", false, e.key) }
+            guard let done = await place(pages, in: own) else { return ("Couldn't save the pages to @\(e.key).", false, e.key, nil, []) }
             refresh()
             mirror(own.path)
             openPage(own.path, done.first)
-            return (summary(pages, placed: done.placed, e.key), true, e.key)
+            return (summary(pages, placed: done.placed, e.key), true, e.key, own.path, done.unnumbered)
         case .new(let type, let key, let fields):
             let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".pdf")
             let pages = labelled(cover: false)
-            guard let done = await place(pages, in: tmp) else { return ("Couldn't make a PDF for @\(key).", false, key) }
-            guard addToLibrary(type: type, key: key, fields: fields, file: tmp, move: true) else { return ("Couldn't add @\(key).", false, key) }
-            mirror(Paths.libraryFolder + "/" + key + ".pdf")
-            return (summary(pages, placed: done.placed, key), true, key)
+            guard let done = await place(pages, in: tmp) else { return ("Couldn't make a PDF for @\(key).", false, key, nil, []) }
+            guard addToLibrary(type: type, key: key, fields: fields, file: tmp, move: true) else { return ("Couldn't add @\(key).", false, key, nil, []) }
+            let path = Paths.libraryFolder + "/" + key + ".pdf"
+            mirror(path)
+            return (summary(pages, placed: done.placed, key), true, key, path, done.unnumbered)
         }
     }
 

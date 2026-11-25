@@ -1,0 +1,29 @@
+name: compile-check
+on:
+  push:
+    branches: [ci-compile-check]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and self-test
+        run: |
+          set +e
+          swiftc -version > ci-result.txt 2>&1
+          swiftc -O -parse-as-library -swift-version 5 -target arm64-apple-macos13.0 PDFSearch.swift -o PDFSearch -lsqlite3 > build.log 2>&1
+          echo "BUILD EXIT $?" >> ci-result.txt
+          grep -E "error|warning: (var|initialization|immutable|will never)" build.log | head -80 >> ci-result.txt
+          if [ -x ./PDFSearch ]; then
+            (./PDFSearch --selftest 2>&1 | head -400) > selftest.log
+            echo "--- selftest" >> ci-result.txt
+            cat selftest.log >> ci-result.txt
+          fi
+      - name: Save result
+        run: |
+          git config user.name "ci"
+          git config user.email "ci@example.invalid"
+          git add -f ci-result.txt
+          git commit -m "ci result" && git push origin HEAD:ci-compile-check
