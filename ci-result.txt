@@ -1,0 +1,70 @@
+swift-driver version: 1.120.5 Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)
+Target: arm64-apple-macosx15.0
+BUILD EXIT 0
+--- selftest
+IOServiceMatchingfailed for: AppleM2ScalerParavirtDriver
+SELFTEST parsed 4 entries (expect 4)
+SELFTEST article x | title=The Aesthetics of Failure: Post-Digital Tendencies | people=["Müller, Jérôme", "O\'Brien, Pat"] | cite=Müller & O'Brien (2000) | newkey=muller2000aesthetics | file=-
+SELFTEST book y | title=Handmade Electronic Music & More | people=["Collins, Nicolas"] | cite=Collins (2006) | newkey=collins2006handmade | file=/Users/x/Papers/Library/y.pdf
+SELFTEST incollection z | title=20 Years of Interfaces | people=["Fasciani, Stefano", "Goode, Jackson", "Third, A."] | cite=Fasciani et al. (2021) | newkey=fasciani202120 | file=-
+SELFTEST misc w | title=On the Glitch | people=["Šiška, Martin", "Øße, K"] | cite=Šiška & Øße (2019) | newkey=siska2019glitch | file=-
+SELFTEST clash: cascone2000aestheticsb
+SELFTEST fold: muller jerome 2000 the aesthetics
+SELFTEST write:
+@book{k,
+  author = {Smith, J},
+  title = {A \& B -- C},
+  url = {http://x.org/a_b},
+  file = {/p/k.pdf}
+}
+
+SELFTEST roundtrip: A & B – C file=/p/k.pdf
+SELFTEST ids: doi=10.1162/014892600559489 arxiv=2103.01234 isbn=9780415998734 isbnText=9780415998734 notIsbn=- name=Cascone, Kim kind=article
+SELFTEST relative: Library/smith2019glitch.pdf | back: true | outside stays: /tmp/x.pdf | bib field: true | jabref: /Users/x/a b.pdf
+SELFTEST own notes: pdf=Library/smith 2019.pdf key=smith2019glitch paragraphs=["First thought about\nglitch.", "- a list\n- of two"] (expect 2)
+SELFTEST own notes (no frontmatter): key=jones2020x paragraphs=["Only text."]
+SELFTEST yellow? ours=true zotero=true essential=false green=false orange=false grey=false (expect true true false false false false)
+SELFTEST thumbnails: isbn=9780262012345 none=- hash=337d487c07018f5d
+SELFTEST thumbnail of Modular Synthesis Notes.pdf: 1489 bytes, 113×160
+SELFTEST recent labels: today 5:30 pm | yesterday | Sunday | Oct 16 | Oct 21, 2025
+SELFTEST tags: ["improvisation", "Ecology/sound"] (expect [improvisation, Ecology/sound]) | has: true false (expect true false)
+SELFTEST obsidian vaults: []
+SELFTEST phrase search: "Accessible"* "instrument"* "des"* | "accessible"* "design"* | "improvisation" "listening"* "body"* | terms ["accessible", "instrument", "design"]
+SELFTEST organisations: ["National Science Foundation (2022)", "Ito et al. (2010)"] (expect [National Science Foundation (2022), Ito et al. (2010)])
+SELFTEST notes query: "post digital" "glitch"* | note file: @a-b-c.md
+SELFTEST link: pdfsearch://open?file=/Users/x/Papers/Proceedings%202021/smith%20%26%20jones%20%28draft%29%20%232.pdf&page=3
+SELFTEST link decodes to: /Users/x/Papers/Proceedings 2021/smith & jones (draft) #2.pdf
+SELFTEST (no file) /Users/runner/Papers/library.bib
+SELFTEST page numbers: 143 42 vii none ["142", "143", "144"] (expect 143 42 vii none [142, 143, 144])
+SELFTEST claude page: ["180 cover -", "270 page 12", "270 - -"] (expect [180 cover -, 270 page 12, 270 - -])
+SELFTEST page kinds: ["12", "13", "cover", "back", "14"] ["cover", "12", "13", "14"] ranks=[-3.0, 1000000.0, 14.0] (expect [12, 13, cover, back, 14] [cover, 12, 13, 14] ranks=[-3.0, 1000000.0, 14.0])
+SELFTEST photo isbn: ["9780415998734"] bad=[] ten=9780415998734 (expect [9780415998734] [] 9780415998734)
+SELFTEST search words: ["\"Peters\"*", "\"Taylor\"*"] | ["\"exact phrase\"", "\"other\"*"] | ["\"one\"*", "\"two\"*"] (expect each word apart, the quoted phrase whole)
+SELFTEST key terms: process-of-adoption none (expect process-of-adoption none)
+SELFTEST title check: true false (expect true false)
+SELFTEST head match: true false (expect true false)
+SELFTEST photo read: 20 lines, 733 characters, cropped=true, number=42, heads=["MODERN SOCIAL IMAGINARIES", "the imaginary is what enables practices"], 325 KB (expect about 20 lines, cropped=true, number=42, head MODERN SOCIAL IMAGINARIES)
+SELFTEST photo ISBN read: ["9780415998734"] (expect [9780415998734])
+SELFTEST photo book labels: ["cover", "41", "42"] (expect [cover, 41, 42])
+SELFTEST photo book: 9 matches for a word in the picture, text=MODERN SOCIAL IMAGINARIES / the imaginary is what en…, 1041483 bytes
+SELFTEST photo thumbnail page: cover, photo book=true, cover=true (expect cover true true)
+SELFTEST photo highlight: saved=true page=42 quote=imaginary markup=1 markerShown=false (expect true 42 imaginary 1 false)
+SELFTEST photo marks: 1 passage, 2 lines, level=Interesting, page=43, quote=normally theare expectationsthat met and…, note=[] (expect 1 passage, 3 lines, Interesting, 43, people imagine…, empty note)
+SELFTEST photo edited quote: quote=the corrected words note=my note (expect the corrected words, my note)
+SELFTEST photo word spacing: pharmakon hypomnemata (expect pharmakon hypomnemata)
+SELFTEST photo inbox: moved true true, Done holds ["IMG_1 2.jpg", "IMG_1.jpg"], left behind=false (expect true true [IMG_1 2.jpg, IMG_1.jpg] false)
+SELFTEST obsidian link: obsidian://open?vault=My%20Vault&file=Literature%2F%40smith2020a (expect vault=My%20Vault&file=Literature%2F%40smith2020a)
+SELFTEST page marker: 178, markers=1 (expect 178, 1)
+BASE BUILD EXIT 0
+0
+0
+--- selftest diff (base vs new)
+25c25
+---
+34a35,36
+> SELFTEST claude page: ["180 cover -", "270 page 12", "270 - -"] (expect [180 cover -, 270 page 12, 270 - -])
+> SELFTEST page kinds: ["12", "13", "cover", "back", "14"] ["cover", "12", "13", "14"] ranks=[-3.0, 1000000.0, 14.0] (expect [12, 13, cover, back, 14] [cover, 12, 13, 14] ranks=[-3.0, 1000000.0, 14.0])
+43c45
+< SELFTEST photo book: 9 matches for a word in the picture, text=MODERN SOCIAL IMAGINARIES / the imaginary is what en…, 717634 bytes
+---
+> SELFTEST photo book: 9 matches for a word in the picture, text=MODERN SOCIAL IMAGINARIES / the imaginary is what en…, 1041483 bytes
